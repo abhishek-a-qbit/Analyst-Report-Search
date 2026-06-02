@@ -38,6 +38,7 @@ class SearchRequest(BaseModel):
 
 class SearchResponse(BaseModel):
     search_query: str
+    search_queries: list = []  # All search queries used
     official_site_query: str
     real_report_names: list  # List of dicts with 'name' and 'link'
     search_results: list
@@ -338,6 +339,7 @@ def search_analyst_reports(user_query: str):
         if real_report_names:
             # Use real report names to search for free versions
             search_queries = []
+            print(f"DEBUG: Generating search queries from {len(real_report_names)} report names")  # Debug logging
             for report in real_report_names[:10]:  # Use top 10 report names for better coverage
                 domain_to_exclude = firm_info["domain"] if firm_info["domain"] else ""
                 if domain_to_exclude:
@@ -345,6 +347,8 @@ def search_analyst_reports(user_query: str):
                 else:
                     query = f'"{report["name"]}" pdf'
                 search_queries.append(query)
+                print(f"DEBUG: Generated query: {query[:80]}...")  # Debug logging
+            print(f"DEBUG: Total search queries generated: {len(search_queries)}")  # Debug logging
         else:
             # Fallback to original method if no real names found
             search_queries = generate_search_queries(user_query)
@@ -359,15 +363,20 @@ def search_analyst_reports(user_query: str):
         
         # Step 4: Run searches for free versions in parallel
         all_results = []
+        print(f"DEBUG: Running {len(search_queries)} search queries in parallel")  # Debug logging
+        
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_query = {executor.submit(perform_serper_search, q): q for q in search_queries}
             
             for future in future_to_query:
                 try:
                     results = future.result(timeout=45)
+                    print(f"DEBUG: Got {len(results)} results from a query")  # Debug logging
                     all_results.extend(results)
                 except Exception as e:
                     all_results.append({"error": f"Search failed: {str(e)}"})
+        
+        print(f"DEBUG: Total results before dedup: {len(all_results)}")  # Debug logging
         
         # Deduplicate results by link
         seen_links = set()
@@ -379,8 +388,11 @@ def search_analyst_reports(user_query: str):
                 seen_links.add(result["link"])
                 deduplicated_results.append(result)
         
+        print(f"DEBUG: Total results after dedup: {len(deduplicated_results)}")  # Debug logging
+        
         return {
             "search_query": search_queries[0] if search_queries else user_query,
+            "search_queries": search_queries,  # Return all search queries
             "official_site_query": official_site_query,
             "real_report_names": real_report_names,
             "search_results": deduplicated_results
@@ -389,6 +401,7 @@ def search_analyst_reports(user_query: str):
         # Return error information for debugging
         return {
             "search_query": user_query,
+            "search_queries": [],
             "official_site_query": "",
             "real_report_names": [],
             "search_results": [{"error": f"Search failed: {str(e)}"}]
@@ -404,6 +417,7 @@ async def search_endpoint(request: SearchRequest):
         result = search_analyst_reports(request.query)
         return {
             "search_query": result["search_query"],
+            "search_queries": result.get("search_queries", []),
             "official_site_query": result["official_site_query"],
             "real_report_names": result["real_report_names"],
             "search_results": result["search_results"]

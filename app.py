@@ -98,10 +98,15 @@ if search_button and user_query:
             else:
                 st.info("No specific report names found. Using general search terms.")
             
-            st.subheader("Step 3: Search Query for Free Versions")
-            st.code(result["search_query"], language="text")
+            st.subheader("Step 3: Search Queries for Free Versions")
+            if result.get("search_queries") and result["search_queries"]:
+                st.markdown(f"**Using {len(result['search_queries'])} search queries based on report names:**")
+                for i, query in enumerate(result["search_queries"], 1):
+                    st.code(query, language="text")
+            else:
+                st.code(result["search_query"], language="text")
             
-            st.subheader("Step 4: Free Version Search Results")
+            st.subheader("Step 4: Final Search Results")
             
             if not result["search_results"]:
                 st.warning("No results found. Try rephrasing your query.")
