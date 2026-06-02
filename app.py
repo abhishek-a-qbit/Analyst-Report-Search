@@ -18,23 +18,23 @@ st.markdown("""
 Find analyst reports from top firms like Gartner, Forrester, IDC, Everest Group, and Quadrant Knowledge Solutions.
 """)
 
-st.sidebar.header("About")
-st.sidebar.info("""
-This tool helps you find analyst reports from any research firm by converting natural language queries into optimized searches.
-
-The LLM uses its knowledge to identify the analyst firm and their specific report type automatically.
-
-**Example Queries:**
-- "What are the typical names of analyst reports for ABM category from Gartner?"
-- "Find Forrester Wave reports for cloud security"
-- "IDC MarketScape for CRM platforms"
-- "Everest Group PEAK Matrix for RPA tools"
-- "Gartner Magic Quadrant for cloud infrastructure"
-""")
-
 # Session state for conversation history
 if "conversation_history" not in st.session_state:
     st.session_state.conversation_history = []
+
+# Sidebar - Search History
+st.sidebar.header("📜 Search History")
+if st.session_state.conversation_history:
+    for idx, entry in enumerate(reversed(st.session_state.conversation_history), 1):
+        with st.sidebar.expander(f"Search #{idx}: {entry['query'][:30]}...", expanded=False):
+            st.sidebar.markdown(f"**Query:** {entry['query']}")
+            if entry.get('official_site_query'):
+                st.sidebar.markdown(f"**Official Query:**")
+                st.sidebar.code(entry['official_site_query'], language="text")
+            st.sidebar.markdown(f"**Free Query:**")
+            st.sidebar.code(entry['search_query'], language="text")
+else:
+    st.sidebar.info("No search history yet.")
 
 # User input
 user_query = st.text_input(
@@ -68,14 +68,33 @@ if search_button and user_query:
             st.session_state.conversation_history.append({
                 "query": user_query,
                 "search_query": result["search_query"],
+                "official_site_query": result.get("official_site_query", ""),
+                "real_report_names": result.get("real_report_names", []),
                 "results": result["search_results"]
             })
             
             # Display current search
-            st.subheader("Search Query Generated")
+            st.subheader("Step 1: Official Site Search")
+            if result.get("official_site_query"):
+                st.code(result["official_site_query"], language="text")
+            else:
+                st.info("No official site query generated (firm not identified)")
+            
+            st.subheader("Step 2: Real Report Names Found")
+            if result.get("real_report_names") and result["real_report_names"]:
+                for i, report in enumerate(result["real_report_names"], 1):
+                    if isinstance(report, dict):
+                        st.markdown(f"{i}. **{report['name']}**")
+                        st.markdown(f"   - Source: [{report['link']}]({report['link']})")
+                    else:
+                        st.markdown(f"{i}. **{report}**")
+            else:
+                st.info("No specific report names found. Using general search terms.")
+            
+            st.subheader("Step 3: Search Query for Free Versions")
             st.code(result["search_query"], language="text")
             
-            st.subheader("Search Results")
+            st.subheader("Step 4: Free Version Search Results")
             
             if not result["search_results"]:
                 st.warning("No results found. Try rephrasing your query.")
@@ -93,25 +112,3 @@ if search_button and user_query:
             st.error("Make sure the FastAPI server is running on http://localhost:8000")
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
-
-# Display conversation history
-if st.session_state.conversation_history:
-    st.divider()
-    st.subheader("📜 Search History")
-    
-    for idx, entry in enumerate(reversed(st.session_state.conversation_history), 1):
-        with st.expander(f"Search #{idx}: {entry['query'][:50]}...", expanded=False):
-            st.markdown(f"**Original Query:** {entry['query']}")
-            st.markdown(f"**Generated Search Query:**")
-            st.code(entry['search_query'], language="text")
-            
-            st.markdown("**Results:**")
-            if entry['results']:
-                for i, res in enumerate(entry['results'], 1):
-                    st.markdown(f"{i}. **{res['title']}**")
-                    st.markdown(f"   - Link: [{res['link']}]({res['link']})")
-                    st.markdown(f"   - {res['snippet']}")
-            else:
-                st.markdown("No results found.")
-
-st.divider()

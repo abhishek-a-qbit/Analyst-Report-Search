@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from bs4 import BeautifulSoup
+import re
 
 load_dotenv()
 
@@ -35,7 +37,136 @@ class SearchRequest(BaseModel):
 
 class SearchResponse(BaseModel):
     search_query: str
+    official_site_query: str
+    real_report_names: list  # List of dicts with 'name' and 'link'
     search_results: list
+
+
+def identify_analyst_firm(user_query: str) -> dict:
+    """Identify the analyst organization and their domain from the user query."""
+    llm = ChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        model=OPENAI_MODEL,
+        temperature=0.1
+    )
+    
+    system_message = """You are an expert at identifying analyst research organizations from user queries.
+
+Identify the analyst organization mentioned and return their official domain.
+
+Common organizations and their domains:
+- Gartner: gartner.com
+- Forrester: forrester.com
+- IDC: idc.com
+- Everest Group: everestgrp.com
+- Quadrant Knowledge Solutions: quadrant-solutions.com
+- G2: g2.com
+- Capterra: capterra.com
+- Omdia: omdia.com
+- 451 Research: 451research.com
+- Frost & Sullivan: frost.com
+- Aberdeen: aberdeen.com
+- Nucleus Research: nucleusresearch.com
+- KLAS Research: klasresearch.com
+- Deloitte: deloitte.com
+- PwC: pwc.com
+- EY: ey.com
+- KPMG: kpmg.com
+
+Return ONLY a JSON object with keys "organization" and "domain". If no specific organization is mentioned, return {"organization": "general", "domain": ""}."""
+    
+    result = llm.invoke([
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_query}
+    ])
+    
+    try:
+        import json
+        data = json.loads(result.content)
+        # Convert "organization" key to "firm" for compatibility
+        if "organization" in data:
+            return {"firm": data["organization"], "domain": data["domain"]}
+        return data
+    except:
+        return {"firm": "general", "domain": ""}
+
+
+def search_official_site(user_query: str, firm_info: dict) -> List[str]:
+    """Search official analyst firm site for real report names."""
+    if firm_info["domain"] == "":
+        return []
+    
+    llm = ChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        model=OPENAI_MODEL,
+        temperature=0.3
+    )
+    
+    system_message = """You are an expert at generating search queries to find real analyst report names on official firm websites.
+
+Generate 3-5 search queries that will find actual report titles on the official analyst firm website.
+
+Rules:
+1. Include the vendor name and their specific report type (e.g., Magic Quadrant, The Wave, MarketScape, etc.)
+2. Include the category/technology area
+3. Add "site:" followed by the domain to search only the official site
+4. Make each query variation slightly different
+5. Return each query on a separate line
+
+Example:
+User: "ABM category from Gartner"
+Output:
+site:gartner.com "Magic Quadrant" "Account-Based Marketing"
+site:gartner.com "Magic Quadrant" ABM
+site:gartner.com "Account Based Marketing" report
+
+Return ONLY the search queries, one per line, nothing else."""
+    
+    user_message = f"User query: {user_query}\nVendor: {firm_info['firm']}\nDomain: {firm_info['domain']}"
+    
+    result = llm.invoke([
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ])
+    
+    queries_text = result.content
+    queries = [q.strip() for q in queries_text.strip().split("\n") if q.strip()]
+    return queries[:5]
+
+
+def scrape_report_titles(url: str) -> List[dict]:
+    """Scrape report titles from a webpage and return with source link."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Try to find report titles in common patterns
+        reports = []
+        
+        # Look for h1, h2, h3 tags that might contain report names
+        for tag in soup.find_all(['h1', 'h2', 'h3']):
+            text = tag.get_text(strip=True)
+            if len(text) > 20 and len(text) < 200:
+                reports.append({"name": text, "link": url})
+        
+        # Look for meta title
+        meta_title = soup.find('meta', attrs={'name': 'title'})
+        if meta_title and meta_title.get('content'):
+            reports.append({"name": meta_title['content'], "link": url})
+        
+        # Look for title tag
+        title_tag = soup.find('title')
+        if title_tag:
+            reports.append({"name": title_tag.get_text(strip=True), "link": url})
+        
+        return reports[:5]  # Return top 5 reports
+    except Exception as e:
+        return []
 
 
 def generate_search_queries(user_query: str) -> List[str]:
@@ -46,21 +177,20 @@ def generate_search_queries(user_query: str) -> List[str]:
         temperature=0.3
     )
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an expert at converting natural language queries into optimized search queries for finding analyst reports from any research firm.
+    system_message = """You are an expert at converting natural language queries into optimized search queries for finding analyst reports from any research source.
 
-Your task is to generate 3-5 different search query variations that will find PDF reports from analyst firms.
+Your task is to generate 3-5 different search query variations that will find PDF reports from analyst sources.
 
 Use your knowledge to identify:
-- The analyst firm mentioned (e.g., Gartner, Forrester, IDC, Everest Group, Quadrant Knowledge Solutions, etc.)
-- The specific report type for that firm (e.g., Magic Quadrant, The Wave, MarketScape, PEAK Matrix, SPARK Matrix, etc.)
+- The analyst source mentioned (e.g., Gartner, Forrester, IDC, Everest Group, Quadrant Knowledge Solutions, etc.)
+- The specific report type for that source (e.g., Magic Quadrant, The Wave, MarketScape, PEAK Matrix, SPARK Matrix, etc.)
 - The category/technology area being researched
 
 Rules:
-1. Include the analyst firm name and their specific report type in quotes
+1. Include the analyst source name and their specific report type in quotes
 2. Include the category/technology area
 3. Add "pdf" to find PDF files
-4. Add "-site:analystfirm.com" to exclude the official site (this helps find free copies on other sites)
+4. Add "-site:analystsource.com" to exclude the official site (this helps find free copies on other sites)
 5. Make each query variation slightly different (different wording, synonyms, etc.)
 6. Return each query on a separate line
 
@@ -71,13 +201,14 @@ Output:
 "Gartner Magic Quadrant ABM platforms" pdf -site:gartner.com
 "Gartner Account Based Marketing Magic Quadrant" pdf -site:gartner.com
 
-Return ONLY the search queries, one per line, nothing else."""),
-        ("human", "{user_query}")
+Return ONLY the search queries, one per line, nothing else."""
+    
+    result = llm.invoke([
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_query}
     ])
     
-    chain = prompt | llm | StrOutputParser()
-    queries_text = chain.invoke({"user_query": user_query})
-    
+    queries_text = result.content
     # Parse the queries (one per line)
     queries = [q.strip() for q in queries_text.strip().split("\n") if q.strip()]
     return queries[:5]  # Limit to 5 queries
@@ -115,57 +246,122 @@ def perform_serper_search(search_query: str) -> List[dict]:
 
 
 def search_analyst_reports(user_query: str):
-    """Main function to search for analyst reports using parallel queries."""
-    # Generate multiple search query variations
-    search_queries = generate_search_queries(user_query)
-    
-    if not search_queries:
+    """Main function to search for analyst reports using two-step process."""
+    try:
+        # Step 1: Identify the analyst firm
+        firm_info = identify_analyst_firm(user_query)
+        
+        # Step 2: Search official site for real report names
+        real_report_names = []
+        official_site_query = ""
+        if firm_info["domain"]:
+            official_queries = search_official_site(user_query, firm_info)
+            official_site_query = official_queries[0] if official_queries else ""
+            
+            # Search official site and scrape titles
+            for query in official_queries[:3]:  # Limit to 3 queries
+                results = perform_serper_search(query)
+                for result in results:
+                    if result.get("link"):
+                        reports = scrape_report_titles(result["link"])
+                        real_report_names.extend(reports)
+            
+            # Deduplicate report names by name
+            seen_names = set()
+            deduplicated_reports = []
+            for report in real_report_names:
+                if isinstance(report, dict) and "name" in report:
+                    if report["name"] not in seen_names:
+                        seen_names.add(report["name"])
+                        deduplicated_reports.append(report)
+            real_report_names = deduplicated_reports
+        
+        # Step 3: Generate search queries using real report names
+        if real_report_names:
+            # Use real report names to search for free versions
+            search_queries = []
+            for report in real_report_names[:3]:  # Use top 3 report names
+                domain_to_exclude = firm_info["domain"] if firm_info["domain"] else ""
+                if domain_to_exclude:
+                    query = f'"{report["name"]}" pdf -site:{domain_to_exclude}'
+                else:
+                    query = f'"{report["name"]}" pdf'
+                search_queries.append(query)
+        else:
+            # Fallback to original method if no real names found
+            search_queries = generate_search_queries(user_query)
+        
+        if not search_queries:
+            return {
+                "search_query": user_query,
+                "official_site_query": official_site_query,
+                "real_report_names": real_report_names,
+                "search_results": []
+            }
+        
+        # Step 4: Run searches for free versions in parallel
+        all_results = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_query = {executor.submit(perform_serper_search, q): q for q in search_queries}
+            
+            for future in future_to_query:
+                try:
+                    results = future.result(timeout=45)
+                    all_results.extend(results)
+                except Exception as e:
+                    all_results.append({"error": f"Search failed: {str(e)}"})
+        
+        # Deduplicate results by link
+        seen_links = set()
+        deduplicated_results = []
+        for result in all_results:
+            if "error" in result:
+                deduplicated_results.append(result)
+            elif result.get("link") and result["link"] not in seen_links:
+                seen_links.add(result["link"])
+                deduplicated_results.append(result)
+        
+        return {
+            "search_query": search_queries[0] if search_queries else user_query,
+            "official_site_query": official_site_query,
+            "real_report_names": real_report_names,
+            "search_results": deduplicated_results
+        }
+    except Exception as e:
+        # Return error information for debugging
         return {
             "search_query": user_query,
-            "search_results": []
+            "official_site_query": "",
+            "real_report_names": [],
+            "search_results": [{"error": f"Search failed: {str(e)}"}]
         }
-    
-    # Run searches in parallel using ThreadPoolExecutor
-    all_results = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_query = {executor.submit(perform_serper_search, q): q for q in search_queries}
-        
-        for future in future_to_query:
-            try:
-                results = future.result(timeout=45)
-                all_results.extend(results)
-            except Exception as e:
-                all_results.append({"error": f"Search failed: {str(e)}"})
-    
-    # Deduplicate results by link
-    seen_links = set()
-    deduplicated_results = []
-    for result in all_results:
-        if "error" in result:
-            deduplicated_results.append(result)
-        elif result.get("link") and result["link"] not in seen_links:
-            seen_links.add(result["link"])
-            deduplicated_results.append(result)
-    
-    return {
-        "search_query": search_queries[0] if search_queries else user_query,
-        "search_results": deduplicated_results
-    }
 
 
 
 
-@app.post("/search", response_model=SearchResponse)
+@app.post("/search")
 async def search_endpoint(request: SearchRequest):
     """FastAPI endpoint to search for analyst reports."""
     try:
         result = search_analyst_reports(request.query)
-        return SearchResponse(
-            search_query=result["search_query"],
-            search_results=result["search_results"]
-        )
+        return {
+            "search_query": result["search_query"],
+            "official_site_query": result["official_site_query"],
+            "real_report_names": result["real_report_names"],
+            "search_results": result["search_results"]
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_detail = {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+        return {
+            "search_query": request.query,
+            "official_site_query": "",
+            "real_report_names": [],
+            "search_results": [{"error": f"API Error: {str(e)}", "details": traceback.format_exc()}]
+        }
 
 
 @app.get("/")
