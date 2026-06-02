@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
+import trafilatura
 import re
 
 load_dotenv()
@@ -143,29 +144,70 @@ def scrape_report_titles(url: str) -> List[dict]:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
+        # Use trafilatura to extract main content (better than BeautifulSoup for content extraction)
+        page_text = trafilatura.extract(response.text, include_comments=False, include_tables=False)
+        
+        if not page_text:
+            # Fallback to BeautifulSoup if trafilatura fails
+            soup = BeautifulSoup(response.text, 'html.parser')
+            page_text = soup.get_text(separator=' ', strip=True)
+        
+        # Limit text length to avoid token limits
+        page_text = page_text[:5000]
+        
+        # Use LLM to extract actual report titles
+        llm = ChatOpenAI(
+            api_key=OPENAI_API_KEY,
+            model=OPENAI_MODEL,
+            temperature=0.1
+        )
+        
+        system_message = """You are an expert at extracting analyst report titles from web pages.
+
+Extract actual analyst report titles from the provided page content. Look for:
+- Full report names (e.g., "IDC MarketScape: Worldwide CRM Platforms 2023")
+- Report types with years (e.g., "Magic Quadrant 2023", "The Wave 2024")
+- Specific research document titles
+
+DO NOT extract:
+- Team names (e.g., "IDC Retail Insights Team")
+- Generic phrases (e.g., "Achieving ROI with GenAI")
+- Navigation elements
+- Author names
+
+Return ONLY a JSON array of report title strings. If no valid report titles are found, return an empty array []."""
+        
+        result = llm.invoke([
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": f"Page URL: {url}\n\nPage Content:\n{page_text}"}
+        ])
+        
+        print(f"DEBUG: LLM response for {url}: {result.content[:200]}")  # Debug logging
+        
+        try:
+            import json
+            titles = json.loads(result.content)
+            if isinstance(titles, list):
+                print(f"DEBUG: Extracted {len(titles)} titles from {url}")  # Debug logging
+                return [{"name": title, "link": url} for title in titles[:5]]
+        except Exception as e:
+            print(f"DEBUG: Failed to parse JSON from LLM: {e}")  # Debug logging
+            pass
+        
+        # Fallback to simple extraction if LLM fails
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Try to find report titles in common patterns
         reports = []
-        
-        # Look for h1, h2, h3 tags that might contain report names
         for tag in soup.find_all(['h1', 'h2', 'h3']):
             text = tag.get_text(strip=True)
-            if len(text) > 20 and len(text) < 200:
+            # Filter out common non-report patterns
+            if (len(text) > 30 and len(text) < 200 and 
+                not any(skip in text.lower() for skip in ['team', 'insights', 'analyst', 'author', 'about', 'contact'])):
                 reports.append({"name": text, "link": url})
         
-        # Look for meta title
-        meta_title = soup.find('meta', attrs={'name': 'title'})
-        if meta_title and meta_title.get('content'):
-            reports.append({"name": meta_title['content'], "link": url})
-        
-        # Look for title tag
-        title_tag = soup.find('title')
-        if title_tag:
-            reports.append({"name": title_tag.get_text(strip=True), "link": url})
-        
-        return reports[:5]  # Return top 5 reports
+        print(f"DEBUG: Fallback extracted {len(reports)} titles from {url}")  # Debug logging
+        return reports[:3]  # Return fewer results from fallback
     except Exception as e:
+        print(f"DEBUG: Error scraping {url}: {e}")  # Debug logging
         return []
 
 
@@ -258,13 +300,27 @@ def search_analyst_reports(user_query: str):
             official_queries = search_official_site(user_query, firm_info)
             official_site_query = official_queries[0] if official_queries else ""
             
+            print(f"DEBUG: Official queries generated: {official_queries}")  # Debug logging
+            
             # Search official site and scrape titles
             for query in official_queries[:3]:  # Limit to 3 queries
+                print(f"DEBUG: Searching with query: {query}")  # Debug logging
                 results = perform_serper_search(query)
+                print(f"DEBUG: Got {len(results)} results from Serper")  # Debug logging
+                
                 for result in results:
                     if result.get("link"):
-                        reports = scrape_report_titles(result["link"])
-                        real_report_names.extend(reports)
+                        print(f"DEBUG: Scraping URL: {result['link']}")  # Debug logging
+                        # First, try to use the title from Serper results directly
+                        if result.get("title") and len(result["title"]) > 20:
+                            real_report_names.append({"name": result["title"], "link": result["link"]})
+                            print(f"DEBUG: Added title from Serper: {result['title'][:50]}")  # Debug logging
+                        else:
+                            # Only scrape if Serper title is not good enough
+                            reports = scrape_report_titles(result["link"])
+                            real_report_names.extend(reports)
+            
+            print(f"DEBUG: Total report names before dedup: {len(real_report_names)}")  # Debug logging
             
             # Deduplicate report names by name
             seen_names = set()
@@ -275,6 +331,8 @@ def search_analyst_reports(user_query: str):
                         seen_names.add(report["name"])
                         deduplicated_reports.append(report)
             real_report_names = deduplicated_reports
+            
+            print(f"DEBUG: Total report names after dedup: {len(real_report_names)}")  # Debug logging
         
         # Step 3: Generate search queries using real report names
         if real_report_names:
