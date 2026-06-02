@@ -22,19 +22,26 @@ Find analyst reports from top firms like Gartner, Forrester, IDC, Everest Group,
 if "conversation_history" not in st.session_state:
     st.session_state.conversation_history = []
 
-# Sidebar - Search History
-st.sidebar.header("📜 Search History")
-if st.session_state.conversation_history:
-    for idx, entry in enumerate(reversed(st.session_state.conversation_history), 1):
-        with st.sidebar.expander(f"Search #{idx}: {entry['query'][:30]}...", expanded=False):
-            st.sidebar.markdown(f"**Query:** {entry['query']}")
-            if entry.get('official_site_query'):
-                st.sidebar.markdown(f"**Official Query:**")
-                st.sidebar.code(entry['official_site_query'], language="text")
-            st.sidebar.markdown(f"**Free Query:**")
-            st.sidebar.code(entry['search_query'], language="text")
-else:
-    st.sidebar.info("No search history yet.")
+# Sidebar - API Status and Info
+st.sidebar.header("� API Status")
+api_status = st.empty()
+
+def check_api_status():
+    try:
+        response = requests.get(f"{API_URL}/", timeout=5)
+        if response.status_code == 200:
+            return "✅ Connected", "success"
+        else:
+            return f"⚠️ Error: {response.status_code}", "warning"
+    except:
+        return "❌ Disconnected", "error"
+
+status, status_type = check_api_status()
+api_status.markdown(f"**Status:** {status}")
+
+st.sidebar.header("ℹ️ Info")
+st.sidebar.markdown(f"**API URL:** {API_URL}")
+st.sidebar.markdown(f"**Searches:** {len(st.session_state.conversation_history)}")
 
 # User input
 user_query = st.text_input(

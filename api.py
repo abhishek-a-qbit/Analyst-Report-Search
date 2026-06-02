@@ -338,7 +338,7 @@ def search_analyst_reports(user_query: str):
         if real_report_names:
             # Use real report names to search for free versions
             search_queries = []
-            for report in real_report_names[:3]:  # Use top 3 report names
+            for report in real_report_names[:10]:  # Use top 10 report names for better coverage
                 domain_to_exclude = firm_info["domain"] if firm_info["domain"] else ""
                 if domain_to_exclude:
                     query = f'"{report["name"]}" pdf -site:{domain_to_exclude}'
