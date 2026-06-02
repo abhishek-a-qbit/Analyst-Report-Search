@@ -266,7 +266,7 @@ def perform_serper_search(search_query: str) -> List[dict]:
     }
     payload = {
         "q": search_query,
-        "num": 10
+        "num": 5
     }
     
     try:
@@ -276,7 +276,7 @@ def perform_serper_search(search_query: str) -> List[dict]:
         
         results = []
         if "organic" in data:
-            for item in data["organic"][:10]:
+            for item in data["organic"][:5]:
                 results.append({
                     "title": item.get("title", ""),
                     "link": item.get("link", ""),
@@ -361,8 +361,8 @@ def search_analyst_reports(user_query: str):
                 "search_results": []
             }
         
-        # Step 4: Run searches for free versions in parallel
-        all_results = []
+        # Step 4: Run searches for free versions in parallel and group by query
+        results_by_query = []
         print(f"DEBUG: Running {len(search_queries)} search queries in parallel")  # Debug logging
         
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -371,31 +371,27 @@ def search_analyst_reports(user_query: str):
             for future in future_to_query:
                 try:
                     results = future.result(timeout=45)
-                    print(f"DEBUG: Got {len(results)} results from a query")  # Debug logging
-                    all_results.extend(results)
+                    query = future_to_query[future]
+                    print(f"DEBUG: Got {len(results)} results from query: {query[:50]}...")  # Debug logging
+                    results_by_query.append({
+                        "query": query,
+                        "results": results
+                    })
                 except Exception as e:
-                    all_results.append({"error": f"Search failed: {str(e)}"})
+                    query = future_to_query[future]
+                    results_by_query.append({
+                        "query": query,
+                        "results": [{"error": f"Search failed: {str(e)}"}]
+                    })
         
-        print(f"DEBUG: Total results before dedup: {len(all_results)}")  # Debug logging
-        
-        # Deduplicate results by link
-        seen_links = set()
-        deduplicated_results = []
-        for result in all_results:
-            if "error" in result:
-                deduplicated_results.append(result)
-            elif result.get("link") and result["link"] not in seen_links:
-                seen_links.add(result["link"])
-                deduplicated_results.append(result)
-        
-        print(f"DEBUG: Total results after dedup: {len(deduplicated_results)}")  # Debug logging
+        print(f"DEBUG: Total query groups: {len(results_by_query)}")  # Debug logging
         
         return {
             "search_query": search_queries[0] if search_queries else user_query,
             "search_queries": search_queries,  # Return all search queries
             "official_site_query": official_site_query,
             "real_report_names": real_report_names,
-            "search_results": deduplicated_results
+            "search_results": results_by_query  # Return results grouped by query
         }
     except Exception as e:
         # Return error information for debugging
