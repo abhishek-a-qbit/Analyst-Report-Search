@@ -257,35 +257,100 @@ Return ONLY the search queries, one per line, nothing else."""
     return queries[:5]  # Limit to 5 queries
 
 
-def perform_serper_search(search_query: str) -> List[dict]:
-    """Execute Serper search with a single query."""
-    url = "https://google.serper.dev/search"
-    headers = {
-        "X-API-KEY": SERPER_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "q": search_query,
-        "num": 5
-    }
+def tweak_search_query(original_query: str, attempt: int) -> str:
+    """Use LLM to progressively simplify the search query when no results are found."""
+    llm = ChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        model=OPENAI_MODEL,
+        temperature=0.3
+    )
     
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+    system_message = """You are an expert at simplifying search queries to find results when the original query returns no results.
+
+Your task is to simplify the given search query by progressively removing specific elements while keeping the core search intent.
+
+Rules:
+1. Remove analyst firm names from quoted titles (e.g., change "Critical Capabilities for Account-Based Marketing Platforms - Gartner" to "Critical Capabilities for Account-Based Marketing Platforms")
+2. Remove specific report type qualifiers if they're too specific
+3. Keep the "pdf" keyword
+4. Keep the "-site:domain" exclusion if present
+5. Make the query more general but still relevant
+6. Return ONLY the simplified query, nothing else
+
+Example:
+Input: "Critical Capabilities for Account-Based Marketing Platforms - Gartner" pdf -site:gartner.com
+Output: "Critical Capabilities for Account-Based Marketing Platforms" pdf -site:gartner.com
+
+Input: "Gartner Magic Quadrant for Account-Based Marketing Platforms 2023" pdf -site:gartner.com
+Output: "Magic Quadrant Account-Based Marketing Platforms" pdf -site:gartner.com"""
+    
+    result = llm.invoke([
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": f"Original query: {original_query}\nAttempt number: {attempt}\n\nSimplify this query to find results."}
+    ])
+    
+    tweaked_query = result.content.strip()
+    print(f"DEBUG: Tweaked query (attempt {attempt}): {tweaked_query}")
+    return tweaked_query
+
+
+def perform_serper_search(search_query: str, max_retries: int = 4) -> tuple:
+    """Execute Serper search with retry mechanism and query tweaking.
+    
+    Returns:
+        tuple: (results: List[dict], all_queries_used: List[str])
+    """
+    all_queries_used = [search_query]
+    
+    for attempt in range(max_retries):
+        url = "https://google.serper.dev/search"
+        headers = {
+            "X-API-KEY": SERPER_API_KEY,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "q": search_query,
+            "num": 5
+        }
         
-        results = []
-        if "organic" in data:
-            for item in data["organic"][:5]:
-                results.append({
-                    "title": item.get("title", ""),
-                    "link": item.get("link", ""),
-                    "snippet": item.get("snippet", "")
-                })
-        
-        return results
-    except Exception as e:
-        return [{"error": f"Search failed: {str(e)}"}]
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            results = []
+            if "organic" in data:
+                for item in data["organic"][:5]:
+                    results.append({
+                        "title": item.get("title", ""),
+                        "link": item.get("link", ""),
+                        "snippet": item.get("snippet", "")
+                    })
+            
+            print(f"DEBUG: Search attempt {attempt + 1} for '{search_query[:50]}...' returned {len(results)} results")
+            
+            # If we got results, return them
+            if results:
+                return results, all_queries_used
+            
+            # If no results and not the last attempt, tweak the query
+            if attempt < max_retries - 1:
+                print(f"DEBUG: No results found, tweaking query for next attempt")
+                search_query = tweak_search_query(search_query, attempt + 1)
+                all_queries_used.append(search_query)
+            else:
+                print(f"DEBUG: No results after {max_retries} attempts")
+                return results, all_queries_used
+                
+        except Exception as e:
+            print(f"DEBUG: Search failed on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                search_query = tweak_search_query(search_query, attempt + 1)
+                all_queries_used.append(search_query)
+            else:
+                return [{"error": f"Search failed after {max_retries} attempts: {str(e)}"}], all_queries_used
+    
+    return [], all_queries_used
 
 
 def search_analyst_reports(user_query: str):
@@ -304,9 +369,11 @@ def search_analyst_reports(user_query: str):
             print(f"DEBUG: Official queries generated: {official_queries}")  # Debug logging
             
             # Search official site and scrape titles
+            all_search_queries = []
             for query in official_queries[:3]:  # Limit to 3 queries
                 print(f"DEBUG: Searching with query: {query}")  # Debug logging
-                results = perform_serper_search(query)
+                results, queries_used = perform_serper_search(query)
+                all_search_queries.extend(queries_used)
                 print(f"DEBUG: Got {len(results)} results from Serper")  # Debug logging
                 
                 for result in results:
@@ -363,6 +430,7 @@ def search_analyst_reports(user_query: str):
         
         # Step 4: Run searches for free versions in parallel and group by query
         results_by_query = []
+        all_queries_tried = search_queries.copy()  # Track all queries tried
         print(f"DEBUG: Running {len(search_queries)} search queries in parallel")  # Debug logging
         
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -370,25 +438,28 @@ def search_analyst_reports(user_query: str):
             
             for future in future_to_query:
                 try:
-                    results = future.result(timeout=45)
+                    results, queries_used = future.result(timeout=45)
                     query = future_to_query[future]
+                    all_queries_tried.extend(queries_used[1:])  # Add tweaked queries (skip the first as it's already in search_queries)
                     print(f"DEBUG: Got {len(results)} results from query: {query[:50]}...")  # Debug logging
                     results_by_query.append({
                         "query": query,
-                        "results": results
+                        "results": results,
+                        "queries_used": queries_used  # Include all queries tried for this search
                     })
                 except Exception as e:
                     query = future_to_query[future]
                     results_by_query.append({
                         "query": query,
-                        "results": [{"error": f"Search failed: {str(e)}"}]
+                        "results": [{"error": f"Search failed: {str(e)}"}],
+                        "queries_used": [query]
                     })
         
         print(f"DEBUG: Total query groups: {len(results_by_query)}")  # Debug logging
         
         return {
             "search_query": search_queries[0] if search_queries else user_query,
-            "search_queries": search_queries,  # Return all search queries
+            "search_queries": all_queries_tried,  # Return all search queries including tweaked ones
             "official_site_query": official_site_query,
             "real_report_names": real_report_names,
             "search_results": results_by_query  # Return results grouped by query
