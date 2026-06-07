@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 import trafilatura
 import re
+from agent import AnalystReportAgent
 
 load_dotenv()
 
@@ -34,6 +35,15 @@ app.add_middleware(
 
 class SearchRequest(BaseModel):
     query: str
+
+
+class DeepSearchRequest(BaseModel):
+    query: str
+    max_iterations: int = 5
+
+
+class CategorySearchRequest(BaseModel):
+    category: str
 
 
 class SearchResponse(BaseModel):
@@ -475,6 +485,86 @@ def search_analyst_reports(user_query: str):
         }
 
 
+def category_search(category: str):
+    """Search for analyst reports across multiple firms for a given category."""
+    try:
+        # Define analyst firms and their domains
+        analyst_firms = [
+            {"name": "Gartner", "domain": "gartner.com", "report_types": ["Magic Quadrant", "Market Guide", "Critical Capabilities"]},
+            {"name": "Forrester", "domain": "forrester.com", "report_types": ["The Wave", "Now Tech", "New Wave"]},
+            {"name": "IDC", "domain": "idc.com", "report_types": ["MarketScape", "Vendor Spotlight", "Worldwide"]},
+            {"name": "Everest Group", "domain": "everestgrp.com", "report_types": ["PEAK Matrix", "Market Vista"]},
+            {"name": "Quadrant Knowledge Solutions", "domain": "quadrant-solutions.com", "report_types": ["SPARK Matrix"]}
+        ]
+        
+        # Generate search queries for each firm
+        all_search_queries = []
+        for firm in analyst_firms:
+            for report_type in firm["report_types"]:
+                # Create query with category, report type, and exclude official site
+                query = f'"{firm["name"]} {report_type} {category}" pdf -site:{firm["domain"]}'
+                all_search_queries.append({
+                    "query": query,
+                    "firm": firm["name"],
+                    "report_type": report_type
+                })
+        
+        print(f"DEBUG: Generated {len(all_search_queries)} category search queries")  # Debug logging
+        
+        # Run searches in parallel
+        results_by_firm = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_firm = {executor.submit(perform_serper_search, item["query"]): item for item in all_search_queries}
+            
+            for future in future_to_firm:
+                try:
+                    results, queries_used = future.result(timeout=45)
+                    item = future_to_firm[future]
+                    firm_name = item["firm"]
+                    report_type = item["report_type"]
+                    
+                    if firm_name not in results_by_firm:
+                        results_by_firm[firm_name] = []
+                    
+                    print(f"DEBUG: Got {len(results)} results for {firm_name} {report_type}")  # Debug logging
+                    
+                    results_by_firm[firm_name].append({
+                        "report_type": report_type,
+                        "query": item["query"],
+                        "results": results,
+                        "queries_used": queries_used
+                    })
+                except Exception as e:
+                    item = future_to_firm[future]
+                    firm_name = item["firm"]
+                    report_type = item["report_type"]
+                    
+                    if firm_name not in results_by_firm:
+                        results_by_firm[firm_name] = []
+                    
+                    results_by_firm[firm_name].append({
+                        "report_type": report_type,
+                        "query": item["query"],
+                        "results": [{"error": f"Search failed: {str(e)}"}],
+                        "queries_used": [item["query"]]
+                    })
+        
+        print(f"DEBUG: Total firms searched: {len(results_by_firm)}")  # Debug logging
+        
+        return {
+            "category": category,
+            "firms_searched": [firm["name"] for firm in analyst_firms],
+            "search_results": results_by_firm
+        }
+    except Exception as e:
+        # Return error information for debugging
+        return {
+            "category": category,
+            "firms_searched": [],
+            "search_results": {"error": f"Category search failed: {str(e)}"}
+        }
+
+
 
 
 @app.post("/search")
@@ -500,6 +590,55 @@ async def search_endpoint(request: SearchRequest):
             "official_site_query": "",
             "real_report_names": [],
             "search_results": [{"error": f"API Error: {str(e)}", "details": traceback.format_exc()}]
+        }
+
+
+@app.post("/deep-search")
+async def deep_search_endpoint(request: DeepSearchRequest):
+    """FastAPI endpoint for intelligent deep search using the agent."""
+    try:
+        agent = AnalystReportAgent()
+        result = agent.search(request.query, max_iterations=request.max_iterations)
+        return {
+            "user_query": result["user_query"],
+            "analyst_firm": result["analyst_firm"],
+            "report_type": result["report_type"],
+            "category": result["category"],
+            "iterations": result["iterations"],
+            "search_queries": result["all_search_queries"],
+            "reasoning_trace": result["reasoning_trace"],
+            "search_results": result["validated_results"]
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "user_query": request.query,
+            "analyst_firm": "",
+            "report_type": "",
+            "category": "",
+            "iterations": 0,
+            "search_queries": [],
+            "reasoning_trace": [f"Error: {str(e)}"],
+            "search_results": [{"error": f"Deep search failed: {str(e)}", "details": traceback.format_exc()}]
+        }
+
+
+@app.post("/category-search")
+async def category_search_endpoint(request: CategorySearchRequest):
+    """FastAPI endpoint for category-based search across multiple analyst firms."""
+    try:
+        result = category_search(request.category)
+        return {
+            "category": result["category"],
+            "firms_searched": result["firms_searched"],
+            "search_results": result["search_results"]
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "category": request.category,
+            "firms_searched": [],
+            "search_results": {"error": f"Category search failed: {str(e)}", "details": traceback.format_exc()}
         }
 
 
