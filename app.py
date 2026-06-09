@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import os
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -16,6 +17,9 @@ st.set_page_config(
 # Initialize session state
 if "conversation_history" not in st.session_state:
     st.session_state.conversation_history = []
+
+if "category_search_results" not in st.session_state:
+    st.session_state.category_search_results = None
 
 # Sidebar - Navigation
 st.sidebar.header("📌 Navigation")
@@ -34,6 +38,91 @@ def check_api_status():
             return f"⚠️ Error: {response.status_code}", "warning"
     except:
         return "❌ Disconnected", "error"
+
+
+def format_category_search_results_to_txt(result: dict) -> str:
+    """Format category search results as a text file."""
+    lines = []
+    lines.append("=" * 80)
+    lines.append("CATEGORY SEARCH RESULTS")
+    lines.append("=" * 80)
+    lines.append(f"Category: {result.get('category', 'N/A')}")
+    lines.append(f"Firms Searched: {', '.join(result.get('firms_searched', []))}")
+    lines.append(f"Official Site Search: {'Enabled' if result.get('search_official_sites') else 'Disabled'}")
+    lines.append(f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 80)
+    lines.append("")
+    
+    # Official site search details
+    if result.get('search_official_sites') and result.get('official_site_queries'):
+        lines.append("STEP 1: OFFICIAL SITE SEARCH")
+        lines.append("-" * 80)
+        lines.append("Official Site Queries:")
+        for query_info in result.get('official_site_queries', []):
+            lines.append(f"  - {query_info['query']}")
+        lines.append("")
+        
+        lines.append("Real Report Names Found:")
+        real_report_names = result.get('real_report_names', {})
+        for firm_name, reports in real_report_names.items():
+            if reports:
+                lines.append(f"\n{firm_name}:")
+                for i, report in enumerate(reports, 1):
+                    lines.append(f"  {i}. {report['name']}")
+                    lines.append(f"     Source: {report['link']}")
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("")
+    
+    # Final search results
+    lines.append("STEP 2: FINAL SEARCH RESULTS BY FIRM")
+    lines.append("-" * 80)
+    lines.append("")
+    
+    search_results = result.get("search_results", {})
+    
+    if "error" in search_results:
+        lines.append(f"Error: {search_results['error']}")
+    elif not search_results:
+        lines.append("No results found.")
+    else:
+        for firm_name, firm_results in search_results.items():
+            lines.append(f"\n{'=' * 80}")
+            lines.append(f"FIRM: {firm_name}")
+            lines.append("=" * 80)
+            
+            if not firm_results:
+                lines.append("No results found for this firm.")
+                continue
+            
+            for report_group in firm_results:
+                report_type = report_group.get("report_type", "")
+                query = report_group.get("query", "")
+                results = report_group.get("results", [])
+                source_link = report_group.get("source_link", "")
+                
+                lines.append(f"\nReport Type: {report_type}")
+                if source_link:
+                    lines.append(f"Source: {source_link}")
+                lines.append(f"Query: {query}")
+                lines.append("-" * 40)
+                
+                if not results:
+                    lines.append("No results for this query.")
+                elif "error" in results[0]:
+                    lines.append(f"Error: {results[0]['error']}")
+                else:
+                    for i, res in enumerate(results, 1):
+                        lines.append(f"\n{i}. {res.get('title', 'No title')}")
+                        lines.append(f"   Link: {res.get('link', 'No link')}")
+                        lines.append(f"   Snippet: {res.get('snippet', 'No snippet')}")
+                lines.append("")
+    
+    lines.append("=" * 80)
+    lines.append("END OF REPORT")
+    lines.append("=" * 80)
+    
+    return "\n".join(lines)
 
 status, status_type = check_api_status()
 api_status.markdown(f"**Status:** {status}")
@@ -256,6 +345,13 @@ elif page == "📂 Category Search":
         key="category_input"
     )
 
+    # Official site search toggle
+    search_official_sites = st.checkbox(
+        "🔍 Search official sites for real report names (slower but more accurate)",
+        value=False,
+        help="When enabled, this will first search official analyst firm websites to find actual report names before generating search queries."
+    )
+
     col1, col2 = st.columns([1, 5])
     with col1:
         search_button = st.button("🔍 Search Category", type="primary")
@@ -271,26 +367,57 @@ elif page == "📂 Category Search":
             try:
                 response = requests.post(
                     f"{API_URL}/category-search",
-                    json={"category": category_input},
-                    timeout=180
+                    json={"category": category_input, "search_official_sites": search_official_sites},
+                    timeout=300 if search_official_sites else 180
                 )
                 response.raise_for_status()
                 result = response.json()
+
+                # Store results in session state for export
+                st.session_state.category_search_results = result
 
                 # Add to conversation history
                 st.session_state.conversation_history.append({
                     "query": category_input,
                     "search_type": "category",
+                    "search_official_sites": search_official_sites,
                     "firms_searched": result.get("firms_searched", []),
+                    "official_site_queries": result.get("official_site_queries", []),
+                    "real_report_names": result.get("real_report_names", {}),
                     "results": result.get("search_results", {})
                 })
 
                 # Display category searched
                 st.subheader(f"📊 Category: {result['category']}")
                 st.markdown(f"**Firms Searched:** {', '.join(result['firms_searched'])}")
+                st.markdown(f"**Official Site Search:** {'Enabled' if result.get('search_official_sites') else 'Disabled'}")
 
-                # Display results by firm
-                st.subheader("🔍 Search Results by Firm")
+                # Display official site search results if enabled
+                if result.get('search_official_sites') and result.get('official_site_queries'):
+                    st.subheader("🔍 Step 1: Official Site Search")
+                    
+                    official_queries = result.get('official_site_queries', [])
+                    for query_info in official_queries:
+                        st.code(query_info['query'], language="text")
+                    
+                    # Display real report names found
+                    st.subheader("📋 Step 2: Real Report Names Found")
+                    real_report_names = result.get('real_report_names', {})
+                    
+                    if not real_report_names:
+                        st.info("No real report names found from official sites. Will use predefined report types.")
+                    else:
+                        for firm_name, reports in real_report_names.items():
+                            if reports:
+                                st.markdown(f"### {firm_name}")
+                                for i, report in enumerate(reports, 1):
+                                    st.markdown(f"{i}. **{report['name']}**")
+                                    st.markdown(f"   - Source: [{report['link']}]({report['link']})")
+                            else:
+                                st.info(f"No report names found for {firm_name}")
+
+                # Display final search results
+                st.subheader("🔍 Step 3: Final Search Results by Firm")
                 
                 search_results = result.get("search_results", {})
                 
@@ -310,8 +437,11 @@ elif page == "📂 Category Search":
                             report_type = report_group.get("report_type", "")
                             query = report_group.get("query", "")
                             results = report_group.get("results", [])
+                            source_link = report_group.get("source_link", "")
                             
                             st.markdown(f"**Report Type:** {report_type}")
+                            if source_link:
+                                st.markdown(f"**Source:** [{source_link}]({source_link})")
                             st.code(query, language="text")
                             
                             if not results:
@@ -325,6 +455,18 @@ elif page == "📂 Category Search":
                                         st.markdown(f"**Snippet:** {res['snippet']}")
                                         st.markdown(f"[Open Link]({res['link']})")
                             st.markdown("---")
+
+                # Export button
+                st.markdown("---")
+                if st.session_state.category_search_results:
+                    txt_content = format_category_search_results_to_txt(st.session_state.category_search_results)
+                    filename = f"category_search_{result['category']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                    st.download_button(
+                        label="📥 Export to TXT",
+                        data=txt_content,
+                        file_name=filename,
+                        mime="text/plain"
+                    )
 
             except requests.exceptions.RequestException as e:
                 st.error(f"Failed to connect to API: {str(e)}")
@@ -383,6 +525,25 @@ elif page == "📜 History":
                     if entry.get('firms_searched'):
                         st.markdown(f"**Firms Searched:** {', '.join(entry['firms_searched'])}")
                     
+                    if entry.get('search_official_sites'):
+                        st.markdown(f"**Official Site Search:** {'Enabled' if entry['search_official_sites'] else 'Disabled'}")
+                    
+                    # Show official site search details if enabled
+                    if entry.get('search_official_sites') and entry.get('official_site_queries'):
+                        with st.expander("View Official Site Search Details", expanded=False):
+                            st.markdown("**Official Site Queries:**")
+                            for query_info in entry['official_site_queries']:
+                                st.code(query_info['query'], language="text")
+                            
+                            st.markdown("**Real Report Names Found:**")
+                            real_report_names = entry.get('real_report_names', {})
+                            for firm_name, reports in real_report_names.items():
+                                if reports:
+                                    st.markdown(f"### {firm_name}")
+                                    for i, report in enumerate(reports, 1):
+                                        st.markdown(f"{i}. **{report['name']}**")
+                                        st.markdown(f"   - Source: [{report['link']}]({report['link']})")
+                    
                     st.markdown("**Results by Firm:**")
                     search_results = entry.get('results', {})
                     
@@ -397,8 +558,11 @@ elif page == "📜 History":
                                     report_type = report_group.get("report_type", "")
                                     query = report_group.get("query", "")
                                     results = report_group.get("results", [])
+                                    source_link = report_group.get("source_link", "")
                                     
                                     st.markdown(f"**Report Type:** {report_type}")
+                                    if source_link:
+                                        st.markdown(f"**Source:** [{source_link}]({source_link})")
                                     st.code(query, language="text")
                                     
                                     if not results:

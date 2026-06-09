@@ -44,6 +44,7 @@ class DeepSearchRequest(BaseModel):
 
 class CategorySearchRequest(BaseModel):
     category: str
+    search_official_sites: bool = False
 
 
 class SearchResponse(BaseModel):
@@ -485,7 +486,7 @@ def search_analyst_reports(user_query: str):
         }
 
 
-def category_search(category: str):
+def category_search(category: str, search_official_sites: bool = False):
     """Search for analyst reports across multiple firms for a given category."""
     try:
         # Define analyst firms and their domains
@@ -497,21 +498,81 @@ def category_search(category: str):
             {"name": "Quadrant Knowledge Solutions", "domain": "quadrant-solutions.com", "report_types": ["SPARK Matrix"]}
         ]
         
-        # Generate search queries for each firm
+        # Step 1: Search official sites for real report names if enabled
+        real_report_names_by_firm = {}
+        official_site_queries = []
+        
+        if search_official_sites:
+            print(f"DEBUG: Searching official sites for real report names")  # Debug logging
+            
+            for firm in analyst_firms:
+                firm_report_names = []
+                for report_type in firm["report_types"]:
+                    # Generate official site query
+                    official_query = f'site:{firm["domain"]} "{report_type}" "{category}"'
+                    official_site_queries.append({
+                        "query": official_query,
+                        "firm": firm["name"],
+                        "report_type": report_type
+                    })
+                    
+                    # Search official site
+                    try:
+                        results, _ = perform_serper_search(official_query)
+                        print(f"DEBUG: Got {len(results)} results from {firm['domain']} for {report_type}")  # Debug logging
+                        
+                        # Scrape report titles from results
+                        for result in results:
+                            if result.get("link"):
+                                if result.get("title") and len(result["title"]) > 20:
+                                    firm_report_names.append({"name": result["title"], "link": result["link"]})
+                                else:
+                                    reports = scrape_report_titles(result["link"])
+                                    firm_report_names.extend(reports)
+                    except Exception as e:
+                        print(f"DEBUG: Error searching {firm['domain']}: {e}")  # Debug logging
+                
+                # Deduplicate report names
+                seen_names = set()
+                deduplicated = []
+                for report in firm_report_names:
+                    if isinstance(report, dict) and "name" in report:
+                        if report["name"] not in seen_names:
+                            seen_names.add(report["name"])
+                            deduplicated.append(report)
+                
+                real_report_names_by_firm[firm["name"]] = deduplicated
+                print(f"DEBUG: Found {len(deduplicated)} real report names for {firm['name']}")  # Debug logging
+        
+        # Step 2: Generate search queries
         all_search_queries = []
-        for firm in analyst_firms:
-            for report_type in firm["report_types"]:
-                # Create query with category, report type, and exclude official site
-                query = f'"{firm["name"]} {report_type} {category}" pdf -site:{firm["domain"]}'
-                all_search_queries.append({
-                    "query": query,
-                    "firm": firm["name"],
-                    "report_type": report_type
-                })
+        
+        if search_official_sites and real_report_names_by_firm:
+            # Use real report names to generate queries
+            for firm in analyst_firms:
+                firm_names = real_report_names_by_firm.get(firm["name"], [])
+                for report in firm_names[:5]:  # Use top 5 report names per firm
+                    query = f'"{report["name"]}" pdf -site:{firm["domain"]}'
+                    all_search_queries.append({
+                        "query": query,
+                        "firm": firm["name"],
+                        "report_type": "Real Report Name",
+                        "source_link": report.get("link", "")
+                    })
+        else:
+            # Use predefined report types
+            for firm in analyst_firms:
+                for report_type in firm["report_types"]:
+                    query = f'"{firm["name"]} {report_type} {category}" pdf -site:{firm["domain"]}'
+                    all_search_queries.append({
+                        "query": query,
+                        "firm": firm["name"],
+                        "report_type": report_type
+                    })
         
         print(f"DEBUG: Generated {len(all_search_queries)} category search queries")  # Debug logging
         
-        # Run searches in parallel
+        # Step 3: Run searches in parallel
         results_by_firm = {}
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_firm = {executor.submit(perform_serper_search, item["query"]): item for item in all_search_queries}
@@ -528,12 +589,17 @@ def category_search(category: str):
                     
                     print(f"DEBUG: Got {len(results)} results for {firm_name} {report_type}")  # Debug logging
                     
-                    results_by_firm[firm_name].append({
+                    result_entry = {
                         "report_type": report_type,
                         "query": item["query"],
                         "results": results,
                         "queries_used": queries_used
-                    })
+                    }
+                    
+                    if "source_link" in item:
+                        result_entry["source_link"] = item["source_link"]
+                    
+                    results_by_firm[firm_name].append(result_entry)
                 except Exception as e:
                     item = future_to_firm[future]
                     firm_name = item["firm"]
@@ -554,6 +620,9 @@ def category_search(category: str):
         return {
             "category": category,
             "firms_searched": [firm["name"] for firm in analyst_firms],
+            "search_official_sites": search_official_sites,
+            "official_site_queries": official_site_queries if search_official_sites else [],
+            "real_report_names": real_report_names_by_firm if search_official_sites else {},
             "search_results": results_by_firm
         }
     except Exception as e:
@@ -561,6 +630,9 @@ def category_search(category: str):
         return {
             "category": category,
             "firms_searched": [],
+            "search_official_sites": search_official_sites,
+            "official_site_queries": [],
+            "real_report_names": {},
             "search_results": {"error": f"Category search failed: {str(e)}"}
         }
 
@@ -627,10 +699,13 @@ async def deep_search_endpoint(request: DeepSearchRequest):
 async def category_search_endpoint(request: CategorySearchRequest):
     """FastAPI endpoint for category-based search across multiple analyst firms."""
     try:
-        result = category_search(request.category)
+        result = category_search(request.category, request.search_official_sites)
         return {
             "category": result["category"],
             "firms_searched": result["firms_searched"],
+            "search_official_sites": result["search_official_sites"],
+            "official_site_queries": result["official_site_queries"],
+            "real_report_names": result["real_report_names"],
             "search_results": result["search_results"]
         }
     except Exception as e:
@@ -638,6 +713,9 @@ async def category_search_endpoint(request: CategorySearchRequest):
         return {
             "category": request.category,
             "firms_searched": [],
+            "search_official_sites": request.search_official_sites,
+            "official_site_queries": [],
+            "real_report_names": {},
             "search_results": {"error": f"Category search failed: {str(e)}", "details": traceback.format_exc()}
         }
 
