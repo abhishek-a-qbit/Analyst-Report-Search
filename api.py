@@ -47,6 +47,11 @@ class CategorySearchRequest(BaseModel):
     search_official_sites: bool = False
 
 
+class WideNetSearchRequest(BaseModel):
+    category: str = ""
+    year: str = ""
+
+
 class SearchResponse(BaseModel):
     search_query: str
     search_queries: list = []  # All search queries used
@@ -486,6 +491,235 @@ def search_analyst_reports(user_query: str):
         }
 
 
+def wide_net_search(category: str = "", year: str = ""):
+    """Cast a wide net to find analyst report PDFs across major firms and search for free copies on vendor sites."""
+    try:
+        # Parse comma-separated categories and years
+        categories = [c.strip() for c in category.split(",") if c.strip()] if category else [""]
+        years = [y.strip() for y in year.split(",") if y.strip()] if year else [""]
+        
+        # Define analyst firms and their report types (restricted to 5 firms as requested)
+        analyst_firms = [
+            {"name": "Gartner", "domain": "gartner.com", "report_types": ["Magic Quadrant", "Market Guide", "Critical Capabilities", "Market Share", "Vendor Guide", "Hype Cycle", "Market Insight", "Emerging Technologies", "Strategic Planning Assumption", "Trend Insight"]},
+            {"name": "Forrester", "domain": "forrester.com", "report_types": ["The Wave", "Now Tech", "New Wave", "Vendor Landscape", "Total Economic Impact", "Tech Radar", "Forrester Wave", "Now Tech", "Budget Planner"]},
+            {"name": "IDC", "domain": "idc.com", "report_types": ["MarketScape", "Vendor Spotlight", "Worldwide", "Market Share", "FutureScape", "IDC PlanScape", "Market Note", "Executive Summary", "Forecast"]},
+            {"name": "Everest Group", "domain": "everestgrp.com", "report_types": ["PEAK Matrix", "Market Vista", "Enterprise Insights", "Digital Impact", "Source", "Peak Matrix", "Market Assessment"]},
+            {"name": "Quadrant Knowledge Solutions", "domain": "quadrant-solutions.com", "report_types": ["SPARK Matrix", "Market Share", "Market Landscape", "Strategic Assessment", "Competitive Landscape"]}
+        ]
+        
+        # Step 1: Generate broad search queries to find report titles
+        broad_search_queries = []
+        
+        for firm in analyst_firms:
+            for report_type in firm["report_types"]:
+                # Generate queries for all combinations of categories and years
+                for cat in categories:
+                    for yr in years:
+                        # Generate queries to find actual report titles
+                        if cat and yr:
+                            query = f'"{firm["name"]} {report_type} {cat} {yr}"'
+                        elif cat:
+                            query = f'"{firm["name"]} {report_type} {cat}"'
+                        elif yr:
+                            query = f'"{firm["name"]} {report_type} {yr}"'
+                        else:
+                            query = f'"{firm["name"]} {report_type}"'
+                        
+                        broad_search_queries.append({
+                            "query": query,
+                            "firm": firm["name"],
+                            "report_type": report_type,
+                            "domain": firm["domain"],
+                            "category": cat,
+                            "year": yr
+                        })
+        
+        print(f"DEBUG: Generated {len(broad_search_queries)} broad search queries")  # Debug logging
+        
+        # Step 2: Execute broad searches to find report titles with validation
+        all_report_titles = []
+        
+        # Define domains to exclude (non-analyst sources)
+        excluded_domains = [
+            'reddit.com', 'twitter.com', 'x.com', 'facebook.com', 'linkedin.com',
+            'medium.com', 'substack.com', 'wordpress.com', 'blogspot.com',
+            'youtube.com', 'tiktok.com', 'instagram.com', 'pinterest.com',
+            'quora.com', 'stackexchange.com', 'github.com', 'gitlab.com'
+        ]
+        
+        def is_valid_analyst_source_for_title(result: dict) -> bool:
+            """Check if a result is from a valid source for extracting report titles."""
+            link = result.get("link", "").lower()
+            
+            # Exclude social media and low-quality sources
+            for excluded in excluded_domains:
+                if excluded in link:
+                    return False
+            
+            # ONLY allow official analyst firm domains for title extraction
+            # This prevents vendor pages from polluting the report titles list
+            analyst_domains = ['gartner.com', 'forrester.com', 'idc.com', 'everestgrp.com', 
+                            'quadrant-solutions.com']
+            if any(domain in link for domain in analyst_domains):
+                return True
+            
+            # NO vendor pages allowed for title extraction
+            # Vendor pages will be searched in the free copy phase using -site: exclusion
+            return False
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_query = {executor.submit(perform_serper_search, item["query"]): item for item in broad_search_queries[:50]}  # Limit to 50 for more comprehensive results
+            
+            for future in future_to_query:
+                try:
+                    results, queries_used = future.result(timeout=45)
+                    item = future_to_query[future]
+                    
+                    print(f"DEBUG: Got {len(results)} results for {item['firm']} {item['report_type']}")  # Debug logging
+                    
+                    # Filter results to only include valid sources
+                    valid_results = [r for r in results if is_valid_analyst_source_for_title(r)]
+                    print(f"DEBUG: Filtered to {len(valid_results)} valid sources from {len(results)} total")  # Debug logging
+                    
+                    # Extract titles from valid results
+                    for result in valid_results:
+                        if result.get("title") and len(result["title"]) > 20:
+                            all_report_titles.append({
+                                "title": result["title"],
+                                "firm": item["firm"],
+                                "report_type": item["report_type"],
+                                "domain": item["domain"],
+                                "source_link": result.get("link", "")
+                            })
+                except Exception as e:
+                    print(f"DEBUG: Error in broad search: {e}")  # Debug logging
+        
+        print(f"DEBUG: Found {len(all_report_titles)} report titles from broad search")  # Debug logging
+        
+        # Step 3: Deduplicate report titles
+        seen_titles = set()
+        deduplicated_titles = []
+        for report in all_report_titles:
+            title_lower = report["title"].lower()
+            if title_lower not in seen_titles:
+                seen_titles.add(title_lower)
+                deduplicated_titles.append(report)
+        
+        print(f"DEBUG: After deduplication: {len(deduplicated_titles)} unique titles")  # Debug logging
+        
+        # Step 4: Generate -site: queries to find free copies on vendor sites
+        free_copy_queries = []
+        
+        for report in deduplicated_titles[:50]:  # Limit to top 50 for more comprehensive results
+            # Generate query excluding the official analyst site
+            query = f'"{report["title"]}" pdf -site:{report["domain"]}'
+            free_copy_queries.append({
+                "query": query,
+                "original_title": report["title"],
+                "firm": report["firm"],
+                "report_type": report["report_type"],
+                "source_link": report["source_link"]
+            })
+        
+        print(f"DEBUG: Generated {len(free_copy_queries)} free copy search queries")  # Debug logging
+        
+        # Step 5: Execute free copy searches with validation
+        free_copy_results = []
+        
+        # Define domains to exclude (non-analyst sources)
+        excluded_domains = [
+            'reddit.com', 'twitter.com', 'x.com', 'facebook.com', 'linkedin.com',
+            'medium.com', 'substack.com', 'wordpress.com', 'blogspot.com',
+            'youtube.com', 'tiktok.com', 'instagram.com', 'pinterest.com',
+            'quora.com', 'stackexchange.com', 'github.com', 'gitlab.com'
+        ]
+        
+        def is_valid_analyst_source(result: dict) -> bool:
+            """Check if a result is from a valid analyst report source."""
+            link = result.get("link", "").lower()
+            title = result.get("title", "").lower()
+            snippet = result.get("snippet", "").lower()
+            
+            # Exclude social media and low-quality sources
+            for excluded in excluded_domains:
+                if excluded in link:
+                    return False
+            
+            # Check for PDF extension
+            if link.endswith('.pdf'):
+                return True
+            
+            # Check for vendor/resource pages (these often host reports)
+            vendor_indicators = ['/resources/', '/whitepapers/', '/reports/', '/analyst-reports/', 
+                               '/research/', '/insights/', '/assets/', '/downloads/']
+            if any(indicator in link for indicator in vendor_indicators):
+                return True
+            
+            # Check for PDF in title or snippet
+            if 'pdf' in title or 'pdf' in snippet:
+                return True
+            
+            # Check for analyst report indicators in title/snippet
+            report_indicators = ['magic quadrant', 'the wave', 'marketscape', 'peak matrix', 
+                                'spark matrix', 'vendor guide', 'market guide', 'analyst report']
+            if any(indicator in title or indicator in snippet for indicator in report_indicators):
+                return True
+            
+            return False
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_query = {executor.submit(perform_serper_search, item["query"]): item for item in free_copy_queries}
+            
+            for future in future_to_query:
+                try:
+                    results, queries_used = future.result(timeout=45)
+                    item = future_to_query[future]
+                    
+                    print(f"DEBUG: Got {len(results)} free copy results for: {item['original_title'][:50]}...")  # Debug logging
+                    
+                    # Filter results to only include valid analyst sources
+                    valid_results = [r for r in results if is_valid_analyst_source(r)]
+                    print(f"DEBUG: Filtered to {len(valid_results)} valid results from {len(results)} total")  # Debug logging
+                    
+                    free_copy_results.append({
+                        "original_title": item["original_title"],
+                        "firm": item["firm"],
+                        "report_type": item["report_type"],
+                        "source_link": item["source_link"],
+                        "search_query": item["query"],
+                        "queries_used": queries_used,
+                        "results": valid_results
+                    })
+                except Exception as e:
+                    print(f"DEBUG: Error in free copy search: {e}")  # Debug logging
+        
+        print(f"DEBUG: Completed wide net search with {len(free_copy_results)} result groups")  # Debug logging
+        
+        return {
+            "category": category,
+            "year": year,
+            "categories": categories,
+            "years": years,
+            "total_titles_found": len(deduplicated_titles),
+            "total_searches_performed": len(free_copy_queries),
+            "report_titles": deduplicated_titles,
+            "free_copy_results": free_copy_results
+        }
+    except Exception as e:
+        import traceback
+        print(f"DEBUG: Wide net search error: {e}")  # Debug logging
+        return {
+            "category": category,
+            "year": year,
+            "categories": categories,
+            "years": years,
+            "total_titles_found": 0,
+            "total_searches_performed": 0,
+            "report_titles": [],
+            "free_copy_results": [{"error": f"Wide net search failed: {str(e)}", "details": traceback.format_exc()}]
+        }
+
+
 def category_search(category: str, search_official_sites: bool = False):
     """Search for analyst reports across multiple firms for a given category."""
     try:
@@ -717,6 +951,35 @@ async def category_search_endpoint(request: CategorySearchRequest):
             "official_site_queries": [],
             "real_report_names": {},
             "search_results": {"error": f"Category search failed: {str(e)}", "details": traceback.format_exc()}
+        }
+
+
+@app.post("/wide-net-search")
+async def wide_net_search_endpoint(request: WideNetSearchRequest):
+    """FastAPI endpoint for wide-net search across all analyst firms to find free PDF copies."""
+    try:
+        result = wide_net_search(request.category, request.year)
+        return {
+            "category": result["category"],
+            "year": result["year"],
+            "categories": result.get("categories", []),
+            "years": result.get("years", []),
+            "total_titles_found": result["total_titles_found"],
+            "total_searches_performed": result["total_searches_performed"],
+            "report_titles": result["report_titles"],
+            "free_copy_results": result["free_copy_results"]
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "category": request.category,
+            "year": request.year,
+            "categories": [],
+            "years": [],
+            "total_titles_found": 0,
+            "total_searches_performed": 0,
+            "report_titles": [],
+            "free_copy_results": {"error": f"Wide net search failed: {str(e)}", "details": traceback.format_exc()}
         }
 
 

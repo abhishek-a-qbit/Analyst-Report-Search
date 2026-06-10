@@ -23,7 +23,7 @@ if "category_search_results" not in st.session_state:
 
 # Sidebar - Navigation
 st.sidebar.header("📌 Navigation")
-page = st.sidebar.radio("Go to", ["🔍 Search", "🤖 Deep Search", "📂 Category Search", "📜 History"])
+page = st.sidebar.radio("Go to", ["🔍 Search", "🤖 Deep Search", "📂 Category Search", "🌐 Wide Net Search", "📜 History"])
 
 # Sidebar - API Status and Info
 st.sidebar.header("🔌 API Status")
@@ -474,6 +474,153 @@ elif page == "📂 Category Search":
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
 
+# Wide Net Search Page
+elif page == "🌐 Wide Net Search":
+    st.title("🌐 Wide Net Search")
+    st.markdown("""
+    Cast a wide net to find analyst report PDFs across major firms (Gartner, Forrester, IDC, Everest Group, Quadrant Knowledge Solutions).
+    
+    This feature:
+    1. Searches official analyst firm sites for real report titles
+    2. Uses `-site:` exclusion to find free copies on vendor websites and other sources
+    
+    """)
+
+    # User input
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        category_input = st.text_input(
+            "Categories (comma-separated, optional):",
+            placeholder="e.g., CRM, ABM, RPA, Cloud Security",
+            key="wide_net_category"
+        )
+    with col2:
+        year_input = st.text_input(
+            "Years (comma-separated, optional):",
+            placeholder="e.g., 2023, 2024",
+            key="wide_net_year"
+        )
+    
+    st.info("💡 Tip: You can enter multiple categories and years separated by commas (e.g., 'CRM, ABM' and '2023, 2024')")
+
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        search_button = st.button("🌐 Cast Wide Net", type="primary")
+    with col2:
+        clear_button = st.button("🗑️ Clear History")
+
+    if clear_button:
+        st.session_state.conversation_history = []
+        st.rerun()
+
+    if search_button:
+        with st.spinner("Casting wide net across all analyst firms... This may take a few minutes."):
+            try:
+                response = requests.post(
+                    f"{API_URL}/wide-net-search",
+                    json={"category": category_input, "year": year_input},
+                    timeout=600  # 10 minutes timeout for comprehensive search
+                )
+                response.raise_for_status()
+                result = response.json()
+
+                # Add to conversation history
+                st.session_state.conversation_history.append({
+                    "query": f"Wide Net Search - Category: {category_input or 'All'}, Year: {year_input or 'All'}",
+                    "search_type": "wide_net",
+                    "category": result.get("category", ""),
+                    "year": result.get("year", ""),
+                    "total_titles_found": result.get("total_titles_found", 0),
+                    "total_searches_performed": result.get("total_searches_performed", 0),
+                    "report_titles": result.get("report_titles", []),
+                    "results": result.get("free_copy_results", [])
+                })
+
+                # Display summary metrics
+                st.subheader("📊 Search Summary")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Report Titles Found", result.get("total_titles_found", 0))
+                with col2:
+                    st.metric("Free Copy Searches Performed", result.get("total_searches_performed", 0))
+                with col3:
+                    categories_display = ", ".join(result.get("categories", [])) if result.get("categories") else "All Categories"
+                    st.metric("Categories", categories_display)
+                if result.get("years") and any(result.get("years")):
+                    years_display = ", ".join(result.get("years", []))
+                    st.metric("Years", years_display)
+
+                # Display report titles found
+                st.subheader("📋 Report Titles Discovered")
+                if result.get("report_titles"):
+                    with st.expander("View All Report Titles Found", expanded=False):
+                        for i, report in enumerate(result["report_titles"], 1):
+                            st.markdown(f"{i}. **{report['title']}**")
+                            st.markdown(f"   - Firm: {report['firm']}")
+                            st.markdown(f"   - Report Type: {report['report_type']}")
+                            if report.get("source_link"):
+                                st.markdown(f"   - Source: [{report['source_link']}]({report['source_link']})")
+                            st.markdown("---")
+                else:
+                    st.info("No report titles found in the initial broad search.")
+
+                # Display free copy search results
+                st.subheader("🔍 Free Copy Search Results (from vendor sites and other sources)")
+                
+                free_copy_results = result.get("free_copy_results", [])
+                
+                if "error" in free_copy_results:
+                    st.error(f"Error: {free_copy_results['error']}")
+                elif not free_copy_results:
+                    st.warning("No free copy results found. Try adjusting the category or year filters.")
+                else:
+                    # Group results by firm
+                    results_by_firm = {}
+                    for result_group in free_copy_results:
+                        if "error" in result_group:
+                            continue
+                        firm = result_group.get("firm", "Unknown")
+                        if firm not in results_by_firm:
+                            results_by_firm[firm] = []
+                        results_by_firm[firm].append(result_group)
+                    
+                    for firm, firm_results in results_by_firm.items():
+                        st.markdown(f"### {firm}")
+                        
+                        for result_group in firm_results:
+                            original_title = result_group.get("original_title", "")
+                            report_type = result_group.get("report_type", "")
+                            search_query = result_group.get("search_query", "")
+                            results = result_group.get("results", [])
+                            source_link = result_group.get("source_link", "")
+                            
+                            st.markdown(f"**Original Report:** {original_title}")
+                            st.markdown(f"**Report Type:** {report_type}")
+                            if source_link:
+                                st.markdown(f"**Original Source:** [{source_link}]({source_link})")
+                            
+                            with st.expander(f"View search query and results", expanded=False):
+                                st.code(search_query, language="text")
+                                
+                                if not results:
+                                    st.warning("No free copies found for this report.")
+                                elif "error" in results[0]:
+                                    st.error(results[0]["error"])
+                                else:
+                                    st.markdown("**Free copies found:**")
+                                    for i, res in enumerate(results, 1):
+                                        st.markdown(f"{i}. **{res['title']}**")
+                                        st.markdown(f"   - Link: [{res['link']}]({res['link']})")
+                                        st.markdown(f"   - Snippet: {res['snippet']}")
+                                        st.markdown(f"[Open Link]({res['link']})")
+                            st.markdown("---")
+
+            except requests.exceptions.RequestException as e:
+                st.error(f"Failed to connect to API: {str(e)}")
+                st.error("Make sure the FastAPI server is running on http://localhost:8000")
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+
 # History Page
 elif page == "📜 History":
     st.title("📜 Search History")
@@ -574,6 +721,57 @@ elif page == "📜 History":
                                             st.markdown(f"{i}. **{res.get('title', 'No title')}**")
                                             st.markdown(f"   - Link: [{res.get('link', 'No link')}]({res.get('link', '#')})")
                                             st.markdown(f"   - Snippet: {res.get('snippet', 'No snippet')[:100]}...")
+                                    st.markdown("---")
+                # Handle wide net search results
+                elif entry.get('search_type') == 'wide_net':
+                    st.markdown("**🌐 Wide Net Search Results**")
+                    
+                    if entry.get('category'):
+                        st.markdown(f"**Category:** {entry['category']}")
+                    if entry.get('year'):
+                        st.markdown(f"**Year:** {entry['year']}")
+                    
+                    st.markdown(f"**Total Titles Found:** {entry.get('total_titles_found', 0)}")
+                    st.markdown(f"**Searches Performed:** {entry.get('total_searches_performed', 0)}")
+                    
+                    if entry.get('report_titles'):
+                        with st.expander("View Report Titles Discovered", expanded=False):
+                            for i, report in enumerate(entry['report_titles'][:20], 1):
+                                st.markdown(f"{i}. **{report['title']}**")
+                                st.markdown(f"   - Firm: {report['firm']}")
+                                st.markdown(f"   - Type: {report['report_type']}")
+                    
+                    st.markdown("**Free Copy Results:**")
+                    results = entry.get('results', [])
+                    
+                    if "error" in results:
+                        st.error(results['error'])
+                    elif not results:
+                        st.warning("No free copy results found.")
+                    else:
+                        # Group by firm
+                        results_by_firm = {}
+                        for result_group in results:
+                            if "error" in result_group:
+                                continue
+                            firm = result_group.get("firm", "Unknown")
+                            if firm not in results_by_firm:
+                                results_by_firm[firm] = []
+                            results_by_firm[firm].append(result_group)
+                        
+                        for firm, firm_results in results_by_firm.items():
+                            with st.expander(f"{firm}", expanded=False):
+                                for result_group in firm_results[:5]:  # Limit to 5 per firm
+                                    st.markdown(f"**Report:** {result_group.get('original_title', 'N/A')}")
+                                    st.markdown(f"**Type:** {result_group.get('report_type', 'N/A')}")
+                                    if result_group.get('source_link'):
+                                        st.markdown(f"**Source:** [{result_group['source_link']}]({result_group['source_link']})")
+                                    
+                                    free_copies = result_group.get('results', [])
+                                    if free_copies and "error" not in free_copies[0]:
+                                        st.markdown(f"**Free copies found:** {len(free_copies)}")
+                                        for i, copy in enumerate(free_copies[:3], 1):
+                                            st.markdown(f"  {i}. [{copy.get('title', 'N/A')}]({copy.get('link', '#')})")
                                     st.markdown("---")
                 else:
                     # Handle regular search results
