@@ -17,6 +17,43 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 
+def tweak_search_query(original_query: str, attempt: int) -> str:
+    """Use LLM to progressively simplify the search query when no results are found."""
+    llm = ChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        model=OPENAI_MODEL,
+        temperature=0.3
+    )
+    
+    system_message = """You are an expert at simplifying search queries to find results when the original query returns no results.
+
+Your task is to simplify the given search query by progressively removing specific elements while keeping the core search intent.
+
+Rules:
+1. Remove analyst firm names from quoted titles (e.g., change "Critical Capabilities for Account-Based Marketing Platforms - Gartner" to "Critical Capabilities for Account-Based Marketing Platforms")
+2. Remove specific report type qualifiers if they're too specific
+3. Keep the "pdf" keyword
+4. Keep the "-site:domain" exclusion if present
+5. Make the query more general but still relevant
+6. Return ONLY the simplified query, nothing else
+
+Example:
+Input: "Critical Capabilities for Account-Based Marketing Platforms - Gartner" pdf -site:gartner.com
+Output: "Critical Capabilities for Account-Based Marketing Platforms" pdf -site:gartner.com
+
+Input: "Gartner Magic Quadrant for Account-Based Marketing Platforms 2023" pdf -site:gartner.com
+Output: "Magic Quadrant Account-Based Marketing Platforms" pdf -site:gartner.com"""
+    
+    result = llm.invoke([
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": f"Original query: {original_query}\nAttempt number: {attempt}\n\nSimplify this query to find results."}
+    ])
+    
+    tweaked_query = result.content.strip()
+    print(f"DEBUG: Tweaked query (attempt {attempt}): {tweaked_query}")
+    return tweaked_query
+
+
 class AgentState(TypedDict):
     """State for the analyst report search agent."""
     user_query: str
@@ -31,6 +68,7 @@ class AgentState(TypedDict):
     max_iterations: int
     found_valid_results: bool
     reasoning: str
+    all_queries_used: List[str]
 
 
 class AnalystReportAgent:
@@ -138,28 +176,28 @@ If any field is not mentioned, set it to null."""),
         strategy_prompts = {
             "direct_pdf_search": """Generate 3-5 search queries to find PDF copies of analyst reports.
 Focus on finding actual PDF files hosted on third-party sites.
-Include: report name in quotes, "pdf", exclude official analyst site.
-Example: "Gartner Magic Quadrant CRM 2023" pdf -site:gartner.com""",
+Include: report name in quotes, "pdf", exclude official analyst site, year filtering (2023 OR 2024 OR 2025).
+Example: "Gartner Magic Quadrant CRM" pdf -site:gartner.com (2023 OR 2024 OR 2025)""",
             
             "vendor_blog_search": """Generate 3-5 search queries to find analyst reports mentioned in vendor blogs.
 Vendors often share analyst reports on their blogs to show their achievements.
-Include: vendor terms, analyst firm name, report type, "blog" or "news".
-Example: "Gartner Magic Quadrant" CRM vendor blog OR news""",
+Include: vendor terms, analyst firm name, report type, "blog" or "news", year filtering (2023 OR 2024 OR 2025).
+Example: "Gartner Magic Quadrant" CRM vendor blog OR news (2023 OR 2024 OR 2025)""",
             
             "slideshare_search": """Generate 3-5 search queries to find analyst reports on SlideShare.
 Many reports are shared as presentations on SlideShare.
-Include: report name, "slideshare", "presentation", "deck".
-Example: "Gartner Magic Quadrant CRM" site:slideshare.net""",
+Include: report name, "slideshare", "presentation", "deck", year filtering (2023 OR 2024 OR 2025).
+Example: "Gartner Magic Quadrant CRM" site:slideshare.net (2023 OR 2024 OR 2025)""",
             
             "academic_repository_search": """Generate 3-5 search queries to find analyst reports in academic repositories.
 Sometimes reports are archived in research repositories.
-Include: report name, "repository", "archive", "research".
-Example: "Gartner Magic Quadrant CRM" repository OR archive""",
+Include: report name, "repository", "archive", "research", year filtering (2023 OR 2024 OR 2025).
+Example: "Gartner Magic Quadrant CRM" repository OR archive (2023 OR 2024 OR 2025)""",
             
             "general_web_search": """Generate 3-5 broad search queries to find any mentions of the analyst report.
 Use general terms and variations.
-Include: report name, analyst firm, category.
-Example: "Gartner Magic Quadrant CRM platforms" 2023 2024"""
+Include: report name, analyst firm, category, year filtering (2023 OR 2024 OR 2025).
+Example: "Gartner Magic Quadrant CRM platforms" (2023 OR 2024 OR 2025)"""
         }
         
         prompt = ChatPromptTemplate.from_messages([
@@ -171,6 +209,8 @@ Context:
 - Analyst Firm: {state['analyst_firm']}
 - Report Type: {state['report_type']}
 - Category: {state['category']}
+
+IMPORTANT: Always include year filtering (2023 OR 2024 OR 2025) to ensure results are from 2023 or later.
 
 Return ONLY the search queries, one per line, nothing else."""),
             ("user", "{query}")
@@ -185,38 +225,67 @@ Return ONLY the search queries, one per line, nothing else."""),
         return state
     
     def execute_search(self, state: AgentState) -> AgentState:
-        """Execute search queries using Serper API."""
+        """Execute search queries using Serper API with query tweaking if no results found."""
         all_results = []
+        all_queries_used = []
         
         for query in state["search_queries"]:
-            try:
-                url = "https://google.serper.dev/search"
-                headers = {
-                    "X-API-KEY": SERPER_API_KEY,
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "q": query,
-                    "num": 10
-                }
-                
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                data = response.json()
-                
-                if "organic" in data:
-                    for item in data["organic"]:
-                        all_results.append({
-                            "title": item.get("title", ""),
-                            "link": item.get("link", ""),
-                            "snippet": item.get("snippet", ""),
-                            "query_used": query
-                        })
-            except Exception as e:
-                print(f"Search failed for query '{query}': {e}")
+            current_query = query
+            all_queries_used.append(current_query)
+            max_retries = 1  # Reduced from 3 to 1 to prevent indefinite tweaking
+            
+            for attempt in range(max_retries):
+                try:
+                    url = "https://google.serper.dev/search"
+                    headers = {
+                        "X-API-KEY": SERPER_API_KEY,
+                        "Content-Type": "application/json"
+                    }
+                    payload = {
+                        "q": current_query,
+                        "num": 10
+                    }
+                    
+                    response = requests.post(url, headers=headers, json=payload, timeout=30)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    results_from_query = []
+                    if "organic" in data:
+                        for item in data["organic"]:
+                            results_from_query.append({
+                                "title": item.get("title", ""),
+                                "link": item.get("link", ""),
+                                "snippet": item.get("snippet", ""),
+                                "query_used": current_query
+                            })
+                    
+                    all_results.extend(results_from_query)
+                    
+                    # If we got results, move to next query
+                    if results_from_query:
+                        print(f"DEBUG: Query '{current_query[:50]}...' returned {len(results_from_query)} results")
+                        break
+                    
+                    # If no results and not the last attempt, tweak the query
+                    if attempt < max_retries - 1:
+                        print(f"DEBUG: No results for query '{current_query[:50]}...', tweaking query (attempt {attempt + 1})")
+                        current_query = tweak_search_query(current_query, attempt + 1)
+                        all_queries_used.append(current_query)
+                    else:
+                        print(f"DEBUG: No results after {max_retries} attempts for query '{query[:50]}...'")
+                        
+                except Exception as e:
+                    print(f"Search failed for query '{current_query}': {e}")
+                    # If error and not the last attempt, try tweaking
+                    if attempt < max_retries - 1:
+                        current_query = tweak_search_query(current_query, attempt + 1)
+                        all_queries_used.append(current_query)
         
+        # Store all queries used for tracking
+        state["all_queries_used"] = all_queries_used
         state["search_results"] = all_results
-        state["reasoning"] = f"Executed search, found {len(all_results)} raw results"
+        state["reasoning"] = f"Executed search with {len(all_queries_used)} total queries (original + tweaked), found {len(all_results)} raw results"
         return state
     
     def validate_results(self, state: AgentState) -> AgentState:
@@ -263,7 +332,19 @@ Return ONLY the search queries, one per line, nothing else."""),
             
             return False
         
-        filtered = [r for r in state["search_results"] if is_likely_pdf_or_report(r)]
+        def is_recent_year(result: Dict) -> bool:
+            """Check if result contains years 2023, 2024, or 2025."""
+            title = result.get("title", "")
+            snippet = result.get("snippet", "")
+            combined_text = f"{title} {snippet}".lower()
+            
+            # Check for recent years
+            recent_years = ['2023', '2024', '2025']
+            has_recent_year = any(year in combined_text for year in recent_years)
+            
+            return has_recent_year
+        
+        filtered = [r for r in state["search_results"] if is_likely_pdf_or_report(r) and is_recent_year(r)]
         
         # Second pass: use LLM to score relevance
         if filtered:
@@ -369,7 +450,8 @@ Return ONLY a JSON array of numbers (ratings), one per result."""),
             "iteration": 0,
             "max_iterations": max_iterations,
             "found_valid_results": False,
-            "reasoning": ""
+            "reasoning": "",
+            "all_queries_used": []
         }
         
         config = {"configurable": {"thread_id": "analyst_search"}}
@@ -388,9 +470,7 @@ Return ONLY a JSON array of numbers (ratings), one per result."""),
     
     def _collect_all_queries(self, state: AgentState) -> List[str]:
         """Collect all queries used during the search."""
-        # This would need to be tracked during execution
-        # For now, return the last set
-        return state.get("search_queries", [])
+        return state.get("all_queries_used", state.get("search_queries", []))
     
     def _build_reasoning_trace(self, state: AgentState) -> List[str]:
         """Build a trace of the agent's reasoning."""

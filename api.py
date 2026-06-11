@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 import trafilatura
 import re
-from agent import AnalystReportAgent
+from agent import AnalystReportAgent, tweak_search_query
 
 load_dotenv()
 
@@ -128,15 +128,16 @@ Rules:
 1. Include the vendor name and their specific report type (e.g., Magic Quadrant, The Wave, MarketScape, etc.)
 2. Include the category/technology area
 3. Add "site:" followed by the domain to search only the official site
-4. Make each query variation slightly different
-5. Return each query on a separate line
+4. Add year filtering: include "(2023 OR 2024 OR 2025)" to ensure results are from 2023 or later
+5. Make each query variation slightly different
+6. Return each query on a separate line
 
 Example:
 User: "ABM category from Gartner"
 Output:
-site:gartner.com "Magic Quadrant" "Account-Based Marketing"
-site:gartner.com "Magic Quadrant" ABM
-site:gartner.com "Account Based Marketing" report
+site:gartner.com "Magic Quadrant" "Account-Based Marketing" (2023 OR 2024 OR 2025)
+site:gartner.com "Magic Quadrant" ABM (2023 OR 2024 OR 2025)
+site:gartner.com "Account Based Marketing" report (2023 OR 2024 OR 2025)
 
 Return ONLY the search queries, one per line, nothing else."""
     
@@ -250,15 +251,16 @@ Rules:
 2. Include the category/technology area
 3. Add "pdf" to find PDF files
 4. Add "-site:analystsource.com" to exclude the official site (this helps find free copies on other sites)
-5. Make each query variation slightly different (different wording, synonyms, etc.)
-6. Return each query on a separate line
+5. Add year filtering: include "(2023 OR 2024 OR 2025)" to ensure results are from 2023 or later
+6. Make each query variation slightly different (different wording, synonyms, etc.)
+7. Return each query on a separate line
 
 Example:
 User: "what are the typical names of analyst reports for abm category from gartner?"
 Output:
-"Gartner Magic Quadrant for Account-Based Marketing Platforms" pdf -site:gartner.com
-"Gartner Magic Quadrant ABM platforms" pdf -site:gartner.com
-"Gartner Account Based Marketing Magic Quadrant" pdf -site:gartner.com
+"Gartner Magic Quadrant for Account-Based Marketing Platforms" pdf -site:gartner.com (2023 OR 2024 OR 2025)
+"Gartner Magic Quadrant ABM platforms" pdf -site:gartner.com (2023 OR 2024 OR 2025)
+"Gartner Account Based Marketing Magic Quadrant" pdf -site:gartner.com (2023 OR 2024 OR 2025)
 
 Return ONLY the search queries, one per line, nothing else."""
     
@@ -271,43 +273,6 @@ Return ONLY the search queries, one per line, nothing else."""
     # Parse the queries (one per line)
     queries = [q.strip() for q in queries_text.strip().split("\n") if q.strip()]
     return queries[:5]  # Limit to 5 queries
-
-
-def tweak_search_query(original_query: str, attempt: int) -> str:
-    """Use LLM to progressively simplify the search query when no results are found."""
-    llm = ChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        model=OPENAI_MODEL,
-        temperature=0.3
-    )
-    
-    system_message = """You are an expert at simplifying search queries to find results when the original query returns no results.
-
-Your task is to simplify the given search query by progressively removing specific elements while keeping the core search intent.
-
-Rules:
-1. Remove analyst firm names from quoted titles (e.g., change "Critical Capabilities for Account-Based Marketing Platforms - Gartner" to "Critical Capabilities for Account-Based Marketing Platforms")
-2. Remove specific report type qualifiers if they're too specific
-3. Keep the "pdf" keyword
-4. Keep the "-site:domain" exclusion if present
-5. Make the query more general but still relevant
-6. Return ONLY the simplified query, nothing else
-
-Example:
-Input: "Critical Capabilities for Account-Based Marketing Platforms - Gartner" pdf -site:gartner.com
-Output: "Critical Capabilities for Account-Based Marketing Platforms" pdf -site:gartner.com
-
-Input: "Gartner Magic Quadrant for Account-Based Marketing Platforms 2023" pdf -site:gartner.com
-Output: "Magic Quadrant Account-Based Marketing Platforms" pdf -site:gartner.com"""
-    
-    result = llm.invoke([
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": f"Original query: {original_query}\nAttempt number: {attempt}\n\nSimplify this query to find results."}
-    ])
-    
-    tweaked_query = result.content.strip()
-    print(f"DEBUG: Tweaked query (attempt {attempt}): {tweaked_query}")
-    return tweaked_query
 
 
 def perform_serper_search(search_query: str, max_retries: int = 4) -> tuple:
@@ -426,9 +391,9 @@ def search_analyst_reports(user_query: str):
             for report in real_report_names[:10]:  # Use top 10 report names for better coverage
                 domain_to_exclude = firm_info["domain"] if firm_info["domain"] else ""
                 if domain_to_exclude:
-                    query = f'"{report["name"]}" pdf -site:{domain_to_exclude}'
+                    query = f'"{report["name"]}" pdf -site:{domain_to_exclude} (2023 OR 2024 OR 2025)'
                 else:
-                    query = f'"{report["name"]}" pdf'
+                    query = f'"{report["name"]}" pdf (2023 OR 2024 OR 2025)'
                 search_queries.append(query)
                 print(f"DEBUG: Generated query: {query[:80]}...")  # Debug logging
             print(f"DEBUG: Total search queries generated: {len(search_queries)}")  # Debug logging
@@ -496,7 +461,7 @@ def wide_net_search(category: str = "", year: str = ""):
     try:
         # Parse comma-separated categories and years
         categories = [c.strip() for c in category.split(",") if c.strip()] if category else [""]
-        years = [y.strip() for y in year.split(",") if y.strip()] if year else [""]
+        years = [y.strip() for y in year.split(",") if y.strip()] if year else ["2023", "2024", "2025"]  # Default to recent years if not specified
         
         # Define analyst firms and their report types (restricted to 5 firms as requested)
         analyst_firms = [
@@ -519,11 +484,11 @@ def wide_net_search(category: str = "", year: str = ""):
                         if cat and yr:
                             query = f'"{firm["name"]} {report_type} {cat} {yr}"'
                         elif cat:
-                            query = f'"{firm["name"]} {report_type} {cat}"'
+                            query = f'"{firm["name"]} {report_type} {cat}" (2023 OR 2024 OR 2025)'
                         elif yr:
                             query = f'"{firm["name"]} {report_type} {yr}"'
                         else:
-                            query = f'"{firm["name"]} {report_type}"'
+                            query = f'"{firm["name"]} {report_type}" (2023 OR 2024 OR 2025)'
                         
                         broad_search_queries.append({
                             "query": query,
@@ -742,8 +707,8 @@ def category_search(category: str, search_official_sites: bool = False):
             for firm in analyst_firms:
                 firm_report_names = []
                 for report_type in firm["report_types"]:
-                    # Generate official site query
-                    official_query = f'site:{firm["domain"]} "{report_type}" "{category}"'
+                    # Generate official site query with year filtering
+                    official_query = f'site:{firm["domain"]} "{report_type}" "{category}" (2023 OR 2024 OR 2025)'
                     official_site_queries.append({
                         "query": official_query,
                         "firm": firm["name"],
@@ -786,7 +751,7 @@ def category_search(category: str, search_official_sites: bool = False):
             for firm in analyst_firms:
                 firm_names = real_report_names_by_firm.get(firm["name"], [])
                 for report in firm_names[:5]:  # Use top 5 report names per firm
-                    query = f'"{report["name"]}" pdf -site:{firm["domain"]}'
+                    query = f'"{report["name"]}" pdf -site:{firm["domain"]} (2023 OR 2024 OR 2025)'
                     all_search_queries.append({
                         "query": query,
                         "firm": firm["name"],
@@ -797,7 +762,7 @@ def category_search(category: str, search_official_sites: bool = False):
             # Use predefined report types
             for firm in analyst_firms:
                 for report_type in firm["report_types"]:
-                    query = f'"{firm["name"]} {report_type} {category}" pdf -site:{firm["domain"]}'
+                    query = f'"{firm["name"]} {report_type} {category}" pdf -site:{firm["domain"]} (2023 OR 2024 OR 2025)'
                     all_search_queries.append({
                         "query": query,
                         "firm": firm["name"],
