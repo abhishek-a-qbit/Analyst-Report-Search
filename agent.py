@@ -9,6 +9,7 @@ import requests
 import json
 from dotenv import load_dotenv
 import re
+from cache_utils import get_cached_results, cache_results
 
 load_dotenv()
 
@@ -116,9 +117,7 @@ If any field is not mentioned, set it to null."""),
         """Select the best search strategy based on query analysis."""
         strategies = [
             "direct_pdf_search",
-            "vendor_blog_search", 
-            "slideshare_search",
-            "academic_repository_search",
+            "vendor_blog_search",
             "general_web_search"
         ]
         
@@ -134,36 +133,29 @@ If any field is not mentioned, set it to null."""),
         return state
     
     def generate_queries(self, state: AgentState) -> AgentState:
-        """Generate search queries based on the selected strategy."""
+        """Generate search queries based on the selected strategy with year filtering (2023-2026)."""
         strategy_prompts = {
             "direct_pdf_search": """Generate 3-5 search queries to find PDF copies of analyst reports.
-Focus on finding actual PDF files hosted on third-party sites.
-Include: report name in quotes, "pdf", exclude official analyst site.
-Example: "Gartner Magic Quadrant CRM 2023" pdf -site:gartner.com""",
+Focus on finding actual PDF files hosted on vendor sites and legitimate sources.
+Include: report name in quotes, "pdf", exclude official analyst site, ALWAYS include year filter (2023 OR 2024 OR 2025 OR 2026).
+Exclude: slideshare, scribd, researchgate, medium, blogs, reviews.
+Example: "Gartner Magic Quadrant CRM" (2023 OR 2024 OR 2025 OR 2026) pdf -site:gartner.com -site:slideshare.net -site:scribd.com -site:researchgate.net""",
             
-            "vendor_blog_search": """Generate 3-5 search queries to find analyst reports mentioned in vendor blogs.
-Vendors often share analyst reports on their blogs to show their achievements.
-Include: vendor terms, analyst firm name, report type, "blog" or "news".
-Example: "Gartner Magic Quadrant" CRM vendor blog OR news""",
+            "vendor_blog_search": """Generate 3-5 search queries to find analyst reports mentioned in vendor resources.
+Vendors often share analyst reports on their resources/whitepapers pages to show their achievements.
+Include: vendor terms, analyst firm name, report type, "resources" or "whitepapers" or "analyst-reports", ALWAYS include year filter (2023 OR 2024 OR 2025 OR 2026).
+Exclude: personal blogs, medium, reviews, slideshare, scribd, researchgate.
+Example: "Gartner Magic Quadrant" CRM (2023 OR 2024 OR 2025 OR 2026) vendor resources OR whitepapers""",
             
-            "slideshare_search": """Generate 3-5 search queries to find analyst reports on SlideShare.
-Many reports are shared as presentations on SlideShare.
-Include: report name, "slideshare", "presentation", "deck".
-Example: "Gartner Magic Quadrant CRM" site:slideshare.net""",
-            
-            "academic_repository_search": """Generate 3-5 search queries to find analyst reports in academic repositories.
-Sometimes reports are archived in research repositories.
-Include: report name, "repository", "archive", "research".
-Example: "Gartner Magic Quadrant CRM" repository OR archive""",
-            
-            "general_web_search": """Generate 3-5 broad search queries to find any mentions of the analyst report.
-Use general terms and variations.
-Include: report name, analyst firm, category.
-Example: "Gartner Magic Quadrant CRM platforms" 2023 2024"""
+            "general_web_search": """Generate 3-5 broad search queries to find legitimate analyst report sources.
+Focus on vendor sites, company resources pages, and legitimate report repositories.
+Include: report name, analyst firm, category, ALWAYS include year filter (2023 OR 2024 OR 2025 OR 2026).
+Exclude: slideshare, scribd, researchgate, medium, blogs, reviews, social media.
+Example: "Gartner Magic Quadrant CRM platforms" (2023 OR 2024 OR 2025 OR 2026) -site:slideshare.net -site:scribd.com -site:researchgate.net"""
         }
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""You are an expert at generating search queries for finding analyst reports.
+            ("system", f"""You are an expert at generating search queries for finding analyst reports from legitimate sources.
             
 {strategy_prompts.get(state['search_strategy'], strategy_prompts['direct_pdf_search'])}
 
@@ -171,6 +163,11 @@ Context:
 - Analyst Firm: {state['analyst_firm']}
 - Report Type: {state['report_type']}
 - Category: {state['category']}
+
+IMPORTANT: 
+1. ALWAYS include year filter (2023 OR 2024 OR 2025 OR 2026) in every query to find recent reports only
+2. ALWAYS exclude low-quality sources: slideshare, scribd, researchgate, medium, personal blogs, reviews
+3. Focus on vendor sites, company resources pages, and legitimate report repositories
 
 Return ONLY the search queries, one per line, nothing else."""),
             ("user", "{query}")
@@ -185,10 +182,24 @@ Return ONLY the search queries, one per line, nothing else."""),
         return state
     
     def execute_search(self, state: AgentState) -> AgentState:
-        """Execute search queries using Serper API."""
+        """Execute search queries using Serper API with caching."""
         all_results = []
         
         for query in state["search_queries"]:
+            # Check cache first
+            cached_results = get_cached_results(query)
+            if cached_results is not None:
+                print(f"DEBUG: Cache HIT for query: {query[:50]}...")
+                for item in cached_results:
+                    all_results.append({
+                        "title": item.get("title", ""),
+                        "link": item.get("link", ""),
+                        "snippet": item.get("snippet", ""),
+                        "query_used": query
+                    })
+                continue
+            
+            # Cache miss - perform actual search
             try:
                 url = "https://google.serper.dev/search"
                 headers = {
@@ -204,14 +215,21 @@ Return ONLY the search queries, one per line, nothing else."""),
                 response.raise_for_status()
                 data = response.json()
                 
+                query_results = []
                 if "organic" in data:
                     for item in data["organic"]:
-                        all_results.append({
+                        result = {
                             "title": item.get("title", ""),
                             "link": item.get("link", ""),
                             "snippet": item.get("snippet", ""),
                             "query_used": query
-                        })
+                        }
+                        query_results.append(result)
+                        all_results.append(result)
+                
+                # Cache the results
+                cache_results(query, query_results)
+                
             except Exception as e:
                 print(f"Search failed for query '{query}': {e}")
         

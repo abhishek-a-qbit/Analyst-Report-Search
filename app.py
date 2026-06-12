@@ -3,6 +3,7 @@ import requests
 import os
 from dotenv import load_dotenv
 from datetime import datetime
+from db_utils import save_search, get_all_searches, clear_all_history, get_search_stats
 
 load_dotenv()
 
@@ -167,14 +168,23 @@ if page == "🔍 Search":
                 result = response.json()
 
                 # Add to conversation history
-                st.session_state.conversation_history.append({
+                history_entry = {
                     "query": user_query,
                     "search_query": result["search_query"],
                     "search_queries": result.get("search_queries", []),
                     "official_site_query": result.get("official_site_query", ""),
                     "real_report_names": result.get("real_report_names", []),
                     "results": result["search_results"]
-                })
+                }
+                st.session_state.conversation_history.append(history_entry)
+                
+                # Save to database
+                save_search(
+                    query=user_query,
+                    search_type="search",
+                    results=history_entry,
+                    metadata={"search_query": result["search_query"]}
+                )
 
                 # Display current search
                 st.subheader("Step 1: Official Site Search")
@@ -276,7 +286,7 @@ elif page == "🤖 Deep Search":
                 result = response.json()
 
                 # Add to conversation history
-                st.session_state.conversation_history.append({
+                history_entry = {
                     "query": user_query,
                     "search_type": "deep",
                     "analyst_firm": result.get("analyst_firm", ""),
@@ -286,7 +296,21 @@ elif page == "🤖 Deep Search":
                     "search_queries": result.get("search_queries", []),
                     "reasoning_trace": result.get("reasoning_trace", []),
                     "results": result.get("search_results", [])
-                })
+                }
+                st.session_state.conversation_history.append(history_entry)
+                
+                # Save to database
+                save_search(
+                    query=user_query,
+                    search_type="deep",
+                    results=history_entry,
+                    metadata={
+                        "analyst_firm": result.get("analyst_firm", ""),
+                        "report_type": result.get("report_type", ""),
+                        "category": result.get("category", ""),
+                        "iterations": result.get("iterations", 0)
+                    }
+                )
 
                 # Display analysis
                 st.subheader("📊 Query Analysis")
@@ -377,7 +401,7 @@ elif page == "📂 Category Search":
                 st.session_state.category_search_results = result
 
                 # Add to conversation history
-                st.session_state.conversation_history.append({
+                history_entry = {
                     "query": category_input,
                     "search_type": "category",
                     "search_official_sites": search_official_sites,
@@ -385,7 +409,19 @@ elif page == "📂 Category Search":
                     "official_site_queries": result.get("official_site_queries", []),
                     "real_report_names": result.get("real_report_names", {}),
                     "results": result.get("search_results", {})
-                })
+                }
+                st.session_state.conversation_history.append(history_entry)
+                
+                # Save to database
+                save_search(
+                    query=category_input,
+                    search_type="category",
+                    results=history_entry,
+                    metadata={
+                        "search_official_sites": search_official_sites,
+                        "firms_searched": result.get("firms_searched", [])
+                    }
+                )
 
                 # Display category searched
                 st.subheader(f"📊 Category: {result['category']}")
@@ -525,7 +561,7 @@ elif page == "🌐 Wide Net Search":
                 result = response.json()
 
                 # Add to conversation history
-                st.session_state.conversation_history.append({
+                history_entry = {
                     "query": f"Wide Net Search - Category: {category_input or 'All'}, Year: {year_input or 'All'}",
                     "search_type": "wide_net",
                     "category": result.get("category", ""),
@@ -534,7 +570,21 @@ elif page == "🌐 Wide Net Search":
                     "total_searches_performed": result.get("total_searches_performed", 0),
                     "report_titles": result.get("report_titles", []),
                     "results": result.get("free_copy_results", [])
-                })
+                }
+                st.session_state.conversation_history.append(history_entry)
+                
+                # Save to database
+                save_search(
+                    query=f"Wide Net Search - Category: {category_input or 'All'}, Year: {year_input or 'All'}",
+                    search_type="wide_net",
+                    results=history_entry,
+                    metadata={
+                        "category": result.get("category", ""),
+                        "year": result.get("year", ""),
+                        "total_titles_found": result.get("total_titles_found", 0),
+                        "total_searches_performed": result.get("total_searches_performed", 0)
+                    }
+                )
 
                 # Display summary metrics
                 st.subheader("📊 Search Summary")
@@ -624,44 +674,82 @@ elif page == "🌐 Wide Net Search":
 # History Page
 elif page == "📜 History":
     st.title("📜 Search History")
-
-    if not st.session_state.conversation_history:
-        st.info("No search history yet. Go to the Search page to perform a search.")
+    
+    # Load search history from database
+    db_searches = get_all_searches(limit=100)
+    
+    # Display statistics
+    stats = get_search_stats()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Searches", stats["total_searches"])
+    with col2:
+        st.metric("Searches This Session", len(st.session_state.conversation_history))
+    with col3:
+        if stats["last_search_timestamp"]:
+            st.metric("Last Search", stats["last_search_timestamp"][:16])
+        else:
+            st.metric("Last Search", "Never")
+    
+    # Show searches by type
+    if stats["searches_by_type"]:
+        st.markdown("**Searches by Type:**")
+        type_cols = st.columns(len(stats["searches_by_type"]))
+        for i, (search_type, count) in enumerate(stats["searches_by_type"].items()):
+            with type_cols[i]:
+                st.metric(search_type.replace("_", " ").title(), count)
+    
+    st.markdown("---")
+    
+    # Clear all button
+    if st.button("🗑️ Clear All History (Database)", type="secondary"):
+        if st.confirm("Are you sure you want to delete all search history from the database? This cannot be undone."):
+            deleted = clear_all_history()
+            st.success(f"Cleared {deleted} records from database")
+            st.rerun()
+    
+    if not db_searches:
+        st.info("No search history in database yet. Go to the Search page to perform a search.")
     else:
-        for idx, entry in enumerate(reversed(st.session_state.conversation_history), 1):
-            with st.expander(f"Search #{idx}: {entry['query'][:50]}...", expanded=False):
+        for idx, entry in enumerate(db_searches, 1):
+            # Get the results from the entry
+            results_data = entry.get("results", {})
+            
+            with st.expander(f"Search #{idx}: {entry['query'][:60]}... ({entry['timestamp'][:16]})", expanded=False):
                 st.markdown(f"**Query:** {entry['query']}")
+                st.markdown(f"**Type:** {entry['search_type'].replace('_', ' ').title()}")
+                st.markdown(f"**Timestamp:** {entry['timestamp']}")
                 
                 # Handle deep search results
                 if entry.get('search_type') == 'deep':
                     st.markdown("**🤖 Deep Search Results**")
                     
-                    if entry.get('analyst_firm'):
+                    if results_data.get('analyst_firm'):
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Firm", entry['analyst_firm'])
+                            st.metric("Firm", results_data['analyst_firm'])
                         with col2:
-                            st.metric("Type", entry['report_type'])
+                            st.metric("Type", results_data['report_type'])
                         with col3:
-                            st.metric("Category", entry['category'])
+                            st.metric("Category", results_data['category'])
                     
-                    st.markdown(f"**Iterations:** {entry.get('iterations', 0)}")
+                    st.markdown(f"**Iterations:** {results_data.get('iterations', 0)}")
                     
-                    if entry.get('reasoning_trace'):
+                    if results_data.get('reasoning_trace'):
                         with st.expander("Reasoning Trace"):
-                            for i, reasoning in enumerate(entry['reasoning_trace'], 1):
+                            for i, reasoning in enumerate(results_data['reasoning_trace'], 1):
                                 st.markdown(f"{i}. {reasoning}")
                     
-                    if entry.get('search_queries'):
+                    if results_data.get('search_queries'):
                         with st.expander("Search Queries"):
-                            for i, query in enumerate(entry['search_queries'], 1):
+                            for i, query in enumerate(results_data['search_queries'], 1):
                                 st.code(query, language="text")
                     
                     st.markdown("**Results:**")
-                    if not entry.get('results'):
+                    if not results_data.get('results'):
                         st.warning("No results found.")
                     else:
-                        for i, res in enumerate(entry['results'], 1):
+                        for i, res in enumerate(results_data['results'], 1):
                             st.markdown(f"{i}. **{res.get('title', 'No title')}**")
                             st.markdown(f"   - Link: [{res.get('link', 'No link')}]({res.get('link', '#')})")
                             st.markdown(f"   - Snippet: {res.get('snippet', 'No snippet')[:100]}...")
@@ -669,21 +757,21 @@ elif page == "📜 History":
                 elif entry.get('search_type') == 'category':
                     st.markdown("**📂 Category Search Results**")
                     
-                    if entry.get('firms_searched'):
-                        st.markdown(f"**Firms Searched:** {', '.join(entry['firms_searched'])}")
+                    if results_data.get('firms_searched'):
+                        st.markdown(f"**Firms Searched:** {', '.join(results_data['firms_searched'])}")
                     
-                    if entry.get('search_official_sites'):
-                        st.markdown(f"**Official Site Search:** {'Enabled' if entry['search_official_sites'] else 'Disabled'}")
+                    if results_data.get('search_official_sites'):
+                        st.markdown(f"**Official Site Search:** {'Enabled' if results_data['search_official_sites'] else 'Disabled'}")
                     
                     # Show official site search details if enabled
-                    if entry.get('search_official_sites') and entry.get('official_site_queries'):
+                    if results_data.get('search_official_sites') and results_data.get('official_site_queries'):
                         with st.expander("View Official Site Search Details", expanded=False):
                             st.markdown("**Official Site Queries:**")
-                            for query_info in entry['official_site_queries']:
+                            for query_info in results_data['official_site_queries']:
                                 st.code(query_info['query'], language="text")
                             
                             st.markdown("**Real Report Names Found:**")
-                            real_report_names = entry.get('real_report_names', {})
+                            real_report_names = results_data.get('real_report_names', {})
                             for firm_name, reports in real_report_names.items():
                                 if reports:
                                     st.markdown(f"### {firm_name}")
@@ -692,7 +780,7 @@ elif page == "📜 History":
                                         st.markdown(f"   - Source: [{report['link']}]({report['link']})")
                     
                     st.markdown("**Results by Firm:**")
-                    search_results = entry.get('results', {})
+                    search_results = results_data.get('results', {})
                     
                     if "error" in search_results:
                         st.error(f"Error: {search_results['error']}")
@@ -726,33 +814,37 @@ elif page == "📜 History":
                 elif entry.get('search_type') == 'wide_net':
                     st.markdown("**🌐 Wide Net Search Results**")
                     
-                    if entry.get('category'):
-                        st.markdown(f"**Category:** {entry['category']}")
-                    if entry.get('year'):
-                        st.markdown(f"**Year:** {entry['year']}")
+                    if results_data.get('category'):
+                        st.markdown(f"**Category:** {results_data['category']}")
+                    if results_data.get('year'):
+                        st.markdown(f"**Year:** {results_data['year']}")
                     
-                    st.markdown(f"**Total Titles Found:** {entry.get('total_titles_found', 0)}")
-                    st.markdown(f"**Searches Performed:** {entry.get('total_searches_performed', 0)}")
+                    st.markdown(f"**Total Titles Found:** {results_data.get('total_titles_found', 0)}")
+                    st.markdown(f"**Searches Performed:** {results_data.get('total_searches_performed', 0)}")
                     
-                    if entry.get('report_titles'):
+                    if results_data.get('report_titles'):
                         with st.expander("View Report Titles Discovered", expanded=False):
-                            for i, report in enumerate(entry['report_titles'][:20], 1):
+                            for i, report in enumerate(results_data['report_titles'][:20], 1):
                                 st.markdown(f"{i}. **{report['title']}**")
                                 st.markdown(f"   - Firm: {report['firm']}")
                                 st.markdown(f"   - Type: {report['report_type']}")
                     
                     st.markdown("**Free Copy Results:**")
-                    results = entry.get('results', [])
+                    results = results_data.get('results', [])
                     
-                    if "error" in results:
-                        st.error(results['error'])
+                    if isinstance(results, str) and "error" in results:
+                        st.error(results)
                     elif not results:
                         st.warning("No free copy results found.")
                     else:
                         # Group by firm
                         results_by_firm = {}
                         for result_group in results:
-                            if "error" in result_group:
+                            if isinstance(result_group, str):
+                                continue
+                            if isinstance(result_group, dict) and "error" in result_group:
+                                continue
+                            if not isinstance(result_group, dict):
                                 continue
                             firm = result_group.get("firm", "Unknown")
                             if firm not in results_by_firm:
@@ -775,33 +867,33 @@ elif page == "📜 History":
                                     st.markdown("---")
                 else:
                     # Handle regular search results
-                    if entry.get('official_site_query'):
+                    if results_data.get('official_site_query'):
                         st.markdown("**Step 1: Official Site Search**")
-                        st.code(entry['official_site_query'], language="text")
+                        st.code(results_data['official_site_query'], language="text")
 
-                    if entry.get('real_report_names'):
+                    if results_data.get('real_report_names'):
                         st.markdown("**Step 2: Real Report Names Found**")
-                        for i, report in enumerate(entry['real_report_names'], 1):
+                        for i, report in enumerate(results_data['real_report_names'], 1):
                             if isinstance(report, dict):
                                 st.markdown(f"{i}. **{report['name']}**")
                                 st.markdown(f"   - Source: [{report['link']}]({report['link']})")
                             else:
                                 st.markdown(f"{i}. **{report}**")
 
-                    if entry.get('search_queries'):
+                    if results_data.get('search_queries'):
                         st.markdown("**Step 3: Search Queries for Free Versions**")
-                        st.markdown(f"**Using {len(entry['search_queries'])} search queries:**")
-                        for i, query in enumerate(entry['search_queries'], 1):
+                        st.markdown(f"**Using {len(results_data['search_queries'])} search queries:**")
+                        for i, query in enumerate(results_data['search_queries'], 1):
                             st.code(query, language="text")
                     else:
                         st.markdown("**Step 3: Search Query for Free Versions**")
-                        st.code(entry['search_query'], language="text")
+                        st.code(results_data['search_query'], language="text")
 
                     st.markdown("**Step 4: Final Search Results**")
-                    if not entry['results']:
+                    if not results_data['results']:
                         st.warning("No results found.")
                     else:
-                        for query_group in entry['results']:
+                        for query_group in results_data['results']:
                             query = query_group.get("query", "")
                             results = query_group.get("results", [])
                             
@@ -817,7 +909,3 @@ elif page == "📜 History":
                                     st.markdown(f"   - Link: [{res['link']}]({res['link']})")
                                     st.markdown(f"   - Snippet: {res['snippet'][:100]}...")
                             st.markdown("---")
-
-        if st.button("🗑️ Clear All History"):
-            st.session_state.conversation_history = []
-            st.rerun()

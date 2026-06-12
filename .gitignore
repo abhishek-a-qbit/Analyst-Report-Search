@@ -10,3 +10,5 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+serper_cache/
+search_history.db
