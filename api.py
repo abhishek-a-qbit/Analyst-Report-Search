@@ -599,6 +599,26 @@ def wide_net_search(category: str = "", year: str = ""):
             
             return False
         
+        def is_valid_year(result: dict) -> bool:
+            """Check if a result contains years 2023-2026."""
+            title = result.get("title", "").lower()
+            snippet = result.get("snippet", "").lower()
+            link = result.get("link", "").lower()
+            
+            # Valid years
+            valid_years = ['2023', '2024', '2025', '2026']
+            
+            # Check if any valid year is present
+            has_valid_year = any(year in title or year in snippet or year in link for year in valid_years)
+            
+            # Check for invalid years (before 2023 or after 2026)
+            invalid_years = ['2010', '2011', '2012', '2013', '2014', '2015', '2016', 
+                           '2017', '2018', '2019', '2020', '2021', '2022', '2027', '2028', '2029']
+            has_invalid_year = any(year in title or year in snippet or year in link for year in invalid_years)
+            
+            # Only allow if it has a valid year and no invalid years
+            return has_valid_year and not has_invalid_year
+        
         with ThreadPoolExecutor(max_workers=5) as executor:
             # Limit to 200 queries to prevent excessive execution time while still getting comprehensive results
             future_to_query = {executor.submit(perform_serper_search, item["query"]): item for item in broad_search_queries[:200]}
@@ -614,8 +634,12 @@ def wide_net_search(category: str = "", year: str = ""):
                     valid_results = [r for r in results if is_valid_analyst_source_for_title(r)]
                     print(f"DEBUG: Filtered to {len(valid_results)} valid sources from {len(results)} total")  # Debug logging
                     
-                    # Extract titles from valid results
-                    for result in valid_results:
+                    # Filter by year to only include 2023-2026
+                    year_valid_results = [r for r in valid_results if is_valid_year(r)]
+                    print(f"DEBUG: Filtered to {len(year_valid_results)} results with valid years from {len(valid_results)}")  # Debug logging
+                    
+                    # Extract titles from year-filtered results
+                    for result in year_valid_results:
                         if result.get("title") and len(result["title"]) > 20:
                             all_report_titles.append({
                                 "title": result["title"],

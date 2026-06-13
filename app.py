@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import os
+import json
 from dotenv import load_dotenv
 from datetime import datetime
 from db_utils import save_search, get_all_searches, clear_all_history, get_search_stats
@@ -716,9 +717,66 @@ elif page == "📜 History":
             results_data = entry.get("results", {})
             
             with st.expander(f"Search #{idx}: {entry['query'][:60]}... ({entry['timestamp'][:16]})", expanded=False):
-                st.markdown(f"**Query:** {entry['query']}")
-                st.markdown(f"**Type:** {entry['search_type'].replace('_', ' ').title()}")
-                st.markdown(f"**Timestamp:** {entry['timestamp']}")
+                # Add download button
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**Query:** {entry['query']}")
+                    st.markdown(f"**Type:** {entry['search_type'].replace('_', ' ').title()}")
+                    st.markdown(f"**Timestamp:** {entry['timestamp']}")
+                with col2:
+                    # Extract links from results
+                    results_data = entry.get("results", {})
+                    links = []
+                    
+                    # Handle different search types to extract links
+                    if entry.get('search_type') == 'deep':
+                        for res in results_data.get('results', []):
+                            if isinstance(res, dict) and res.get('link'):
+                                links.append(res['link'])
+                    elif entry.get('search_type') == 'category':
+                        for firm_results in results_data.values():
+                            if isinstance(firm_results, list):
+                                for report_group in firm_results:
+                                    if isinstance(report_group, dict):
+                                        for res in report_group.get('results', []):
+                                            if isinstance(res, dict) and res.get('link'):
+                                                links.append(res['link'])
+                    elif entry.get('search_type') == 'wide_net':
+                        for result_group in results_data:
+                            if isinstance(result_group, dict):
+                                for res in result_group.get('results', []):
+                                    if isinstance(res, dict) and res.get('link'):
+                                        links.append(res['link'])
+                    else:  # regular search
+                        for query_group in results_data:
+                            if isinstance(query_group, dict):
+                                for res in query_group.get('results', []):
+                                    if isinstance(res, dict) and res.get('link'):
+                                        links.append(res['link'])
+                    
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    unique_links = []
+                    for link in links:
+                        if link not in seen:
+                            seen.add(link)
+                            unique_links.append(link)
+                    
+                    # Create text file content
+                    text_content = f"Query: {entry['query']}\n"
+                    text_content += f"Search Type: {entry['search_type']}\n"
+                    text_content += f"Timestamp: {entry['timestamp']}\n"
+                    text_content += f"Total Links: {len(unique_links)}\n"
+                    text_content += "-" * 50 + "\n\n"
+                    text_content += "\n".join(unique_links)
+                    
+                    st.download_button(
+                        label="📥 Download Links",
+                        data=text_content,
+                        file_name=f"search_{entry['id']}_{entry['search_type']}_links.txt",
+                        mime="text/plain",
+                        key=f"download_{entry['id']}"
+                    )
                 
                 # Handle deep search results
                 if entry.get('search_type') == 'deep':
